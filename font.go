@@ -34,6 +34,9 @@ type Font struct {
 	loca             []uint32
 	glyf             []byte
 	cmap             cmapLookup
+	fvar             *fvarTable // optional: variation axes and named instances
+	avar             *avarTable // optional: axis-value segment maps
+	gvar             *gvarTable // optional: glyph variation (delta) data
 }
 
 // be16 reads a big-endian uint16 from b[0:2]; the caller guarantees len(b)>=2.
@@ -113,6 +116,12 @@ func Parse(b []byte) (*Font, error) {
 	}
 	f.glyf = tables["glyf"]
 	if err := f.parseCmap(tables["cmap"]); err != nil {
+		return nil, err
+	}
+	// Optional OpenType Font Variations tables. A font without them parses and
+	// renders exactly as before; when present they enable instancing at a
+	// chosen axis coordinate (see fvar.go, avar.go, gvar.go).
+	if err := f.parseVariations(tables); err != nil {
 		return nil, err
 	}
 	return f, nil
