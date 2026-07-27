@@ -450,7 +450,7 @@ func TestParseErrors(t *testing.T) {
 		}, "cmap subtable offset"},
 		{"cmap no supported subtable", func() []byte {
 			tb := stdTables(false, false)
-			tb["cmap"] = cmapTable([][]byte{{0, 6}}) // format 6, unsupported
+			tb["cmap"] = cmapTable([][]byte{{0, 1}}) // format 1, unsupported
 			return assemble(versionTrueType, tb)
 		}, "no supported cmap subtable"},
 		{"cmap4 truncated", func() []byte {
@@ -471,6 +471,98 @@ func TestParseErrors(t *testing.T) {
 			tb["cmap"] = cmapTable([][]byte{sub[:16]})
 			return assemble(versionTrueType, tb)
 		}, "cmap format 12 groups"},
+		{"cmap0 truncated", func() []byte {
+			tb := stdTables(false, false)
+			var arr [256]byte
+			sub := cmap0Bytes(arr)
+			tb["cmap"] = cmapTable([][]byte{sub[:10]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 0"},
+		{"cmap6 header truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap6Bytes(0x41, []uint16{1, 2, 3})
+			tb["cmap"] = cmapTable([][]byte{sub[:8]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 6 header"},
+		{"cmap6 array truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap6Bytes(0x41, []uint16{1, 2, 3})
+			tb["cmap"] = cmapTable([][]byte{sub[:len(sub)-1]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 6"},
+		{"cmap2 keys truncated", func() []byte {
+			tb := stdTables(false, false)
+			var keys [256]uint16
+			sub := cmap2Bytes(keys, []cmap2SubHeaderSpec{{}}, nil)
+			tb["cmap"] = cmapTable([][]byte{sub[:10]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 2 keys"},
+		{"cmap2 subheaders truncated", func() []byte {
+			tb := stdTables(false, false)
+			var keys [256]uint16
+			sub := cmap2Bytes(keys, []cmap2SubHeaderSpec{{}}, nil)
+			tb["cmap"] = cmapTable([][]byte{sub[:6+512+2]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 2 subheaders"},
+		{"cmap14 header truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00}})
+			tb["cmap"] = cmapTable([][]byte{sub[:8]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 header"},
+		{"cmap14 records truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00}})
+			tb["cmap"] = cmapTable([][]byte{sub[:12]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 records"},
+		{"cmap14 default UVS offset out of range", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00}})
+			binary.BigEndian.PutUint32(sub[10+3:], 0xFFFFFF) // defaultUVSOffset
+			tb["cmap"] = cmapTable([][]byte{sub})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 default UVS offset"},
+		{"cmap14 default UVS header truncated", func() []byte {
+			tb := stdTables(false, false)
+			// One record (headerLen=21) with only a default table: defOff=21.
+			// Leaving only 2 of the 4 numRanges bytes fails the header read.
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00, defaultRanges: [][2]uint32{{0x41, 0}}}})
+			tb["cmap"] = cmapTable([][]byte{sub[:23]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 default UVS header"},
+		{"cmap14 default UVS ranges truncated", func() []byte {
+			tb := stdTables(false, false)
+			// numRanges (4 bytes at 21..25) is readable, but the one range
+			// record (4 bytes at 25..29) is cut short.
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00, defaultRanges: [][2]uint32{{0x41, 0}}}})
+			tb["cmap"] = cmapTable([][]byte{sub[:27]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 default UVS ranges"},
+		{"cmap14 non-default UVS offset out of range", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00}})
+			binary.BigEndian.PutUint32(sub[10+7:], 0xFFFFFF) // nonDefaultUVSOffset
+			tb["cmap"] = cmapTable([][]byte{sub})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 non-default UVS offset"},
+		{"cmap14 non-default UVS header truncated", func() []byte {
+			tb := stdTables(false, false)
+			// One record (headerLen=21) with only a non-default table:
+			// nonDefOff=21. Leaving only 2 of the 4 numMappings bytes fails
+			// the header read.
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00, nonDefault: map[uint32]uint16{0x41: 7}}})
+			tb["cmap"] = cmapTable([][]byte{sub[:23]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 non-default UVS header"},
+		{"cmap14 non-default UVS mappings truncated", func() []byte {
+			tb := stdTables(false, false)
+			// numMappings (4 bytes at 21..25) is readable, but the one
+			// mapping record (5 bytes at 25..30) is cut short.
+			sub := cmap14Bytes([]cmap14Selector{{varSelector: 0xFE00, nonDefault: map[uint32]uint16{0x41: 7}}})
+			tb["cmap"] = cmapTable([][]byte{sub[:27]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 14 non-default UVS mappings"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -578,6 +670,225 @@ func TestCmap4NoSentinel(t *testing.T) {
 	}
 	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 1 {
 		t.Errorf("0x41 -> %d,%v want 1,true", gid, ok)
+	}
+}
+
+// cmapOnlyFont builds a minimal 3-glyph font whose cmap table is exactly the
+// provided subtables, so a lookup exercises a chosen format in isolation.
+func cmapOnlyFont(t *testing.T, subtables [][]byte) *Font {
+	t.Helper()
+	glyphs := [][]byte{nil, nil, nil} // 3 empty glyphs (0..2 valid indices)
+	loca, glyf := glyfAndLoca(glyphs, false)
+	adv := []int{300, 300, 300}
+	lsb := []int{10, 10, 10}
+	tables := map[string][]byte{
+		"head": headTable(1000, 0),
+		"maxp": maxpTable(len(glyphs)),
+		"hhea": hheaTable(800, -200, 100, len(glyphs)),
+		"hmtx": hmtxTable(adv, lsb, len(glyphs)),
+		"cmap": cmapTable(subtables),
+		"loca": loca,
+		"glyf": glyf,
+	}
+	return mustParse(t, assemble(versionTrueType, tables))
+}
+
+func TestCmap0Lookup(t *testing.T) {
+	var arr [256]byte
+	arr[0x41] = 1 // 'A' -> glyph 1
+	arr[0x42] = 2 // 'B' -> glyph 2
+	// 0x43 left 0 -> unmapped
+	f := cmapOnlyFont(t, [][]byte{cmap0Bytes(arr)})
+
+	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 1 {
+		t.Errorf("0x41 -> %d,%v want 1,true", gid, ok)
+	}
+	if gid, ok := f.GlyphIndex(0x42); !ok || gid != 2 {
+		t.Errorf("0x42 -> %d,%v want 2,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x43); ok {
+		t.Errorf("0x43 maps to glyph 0, want unmapped")
+	}
+	if _, ok := f.GlyphIndex(0x100); ok { // out of the 0..255 range
+		t.Errorf("0x100 out of range, want unmapped")
+	}
+}
+
+func TestCmap6Lookup(t *testing.T) {
+	// Range 0x41..0x43 -> glyphs {1, 0, 2}; a 0 entry is unmapped.
+	f := cmapOnlyFont(t, [][]byte{cmap6Bytes(0x41, []uint16{1, 0, 2})})
+
+	if _, ok := f.GlyphIndex(0x40); ok { // below firstCode
+		t.Errorf("0x40 below range, want unmapped")
+	}
+	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 1 {
+		t.Errorf("0x41 -> %d,%v want 1,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x42); ok { // entry 0 -> unmapped
+		t.Errorf("0x42 maps to glyph 0, want unmapped")
+	}
+	if gid, ok := f.GlyphIndex(0x43); !ok || gid != 2 {
+		t.Errorf("0x43 -> %d,%v want 2,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x44); ok { // past the last entry
+		t.Errorf("0x44 past range, want unmapped")
+	}
+}
+
+func TestCmap6Empty(t *testing.T) {
+	// An empty trimmed range: every lookup falls out via the length check.
+	f := cmapOnlyFont(t, [][]byte{cmap6Bytes(0x41, nil), cmap0Bytes([256]byte{})})
+	if _, ok := f.GlyphIndex(0x41); ok {
+		t.Errorf("empty format-6 range: 0x41 should be unmapped")
+	}
+}
+
+func TestCmap2SingleAndDoubleByte(t *testing.T) {
+	// subHeader 0 (single-byte, high byte 0): firstCode=0x41, entryCount=2.
+	// subHeader 1 (double-byte, high byte 0x81): firstCode=0x40, entryCount=1.
+	var keys [256]uint16
+	keys[0x81] = 8 // high byte 0x81 -> subHeader index 1 (offset 8)
+
+	subs := []cmap2SubHeaderSpec{
+		{firstCode: 0x41, entryCount: 2, idDelta: 0},
+		{firstCode: 0x40, entryCount: 1, idDelta: 0},
+	}
+	// Two subHeaders: subHeader 0's idRangeOffset field precedes
+	// glyphIndexArray by 2*8-6 = 10 bytes; to point at array[0] set 10.
+	// subHeader 1's field precedes array by 8-6 = 2 bytes; to point at
+	// array[2] set 2 + 2*2 = 6.
+	subs[0].idRangeOffset = 10
+	subs[1].idRangeOffset = 6
+	glyphIndexArray := []uint16{1, 0, 5} // array[0]=1('A'), array[1]=0(unmapped), array[2]=5
+
+	f := cmapOnlyFont(t, [][]byte{cmap2Bytes(keys, subs, glyphIndexArray)})
+
+	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 1 { // single-byte
+		t.Errorf("0x41 -> %d,%v want 1,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x42); ok { // array entry 0 -> unmapped
+		t.Errorf("0x42 maps to glyph 0, want unmapped")
+	}
+	if _, ok := f.GlyphIndex(0x43); ok { // outside entryCount
+		t.Errorf("0x43 outside entryCount, want unmapped")
+	}
+	if gid, ok := f.GlyphIndex(0x8140); !ok || gid != 5 { // double-byte
+		t.Errorf("0x8140 -> %d,%v want 5,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x8141); ok { // outside entryCount
+		t.Errorf("0x8141 outside entryCount, want unmapped")
+	}
+	if _, ok := f.GlyphIndex(0x10000); ok { // above 0xFFFF
+		t.Errorf("0x10000 out of range, want unmapped")
+	}
+}
+
+func TestCmap2IdDeltaAndNoRange(t *testing.T) {
+	// subHeader 0 applies idDelta; high byte 0x82 has idRangeOffset==0
+	// (unmapped) and 0x83 indexes past glyphIndexArray (out of bounds).
+	var keys [256]uint16
+	keys[0x82] = 8  // -> subHeader 1: idRangeOffset 0 (unmapped)
+	keys[0x83] = 16 // -> subHeader 2: idRangeOffset points past array (oob)
+
+	subs := []cmap2SubHeaderSpec{
+		{firstCode: 0x41, entryCount: 1, idDelta: 3}, // idRangeOffset set below
+		{firstCode: 0x00, entryCount: 1, idDelta: 0}, // idRangeOffset 0 => unmapped
+		{firstCode: 0x00, entryCount: 1, idDelta: 0, idRangeOffset: 0xFFFF},
+	}
+	// 3 subHeaders: subHeader 0's field precedes array by 3*8-6 = 18 bytes;
+	// point at array[0] with 18.
+	subs[0].idRangeOffset = 18
+	glyphIndexArray := []uint16{10} // 'A' -> array[0]=10, +idDelta 3 = 13
+
+	f := cmapOnlyFont(t, [][]byte{cmap2Bytes(keys, subs, glyphIndexArray)})
+
+	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 13 {
+		t.Errorf("0x41 -> %d,%v want 13,true (idDelta)", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x8200); ok { // idRangeOffset==0
+		t.Errorf("0x8200 idRangeOffset 0, want unmapped")
+	}
+	if _, ok := f.GlyphIndex(0x8300); ok { // index past glyphIndexArray
+		t.Errorf("0x8300 index out of range, want unmapped")
+	}
+}
+
+func TestCmap2ZeroGlyphMaps(t *testing.T) {
+	// A glyphIndexArray entry of 0 (after selection) maps to .notdef.
+	var keys [256]uint16
+	// One subHeader: its idRangeOffset field precedes glyphIndexArray by
+	// 1*8-6 = 2 bytes, so idRangeOffset 2 points at array[0].
+	subs := []cmap2SubHeaderSpec{{firstCode: 0x41, entryCount: 1, idDelta: 0, idRangeOffset: 2}}
+	glyphIndexArray := []uint16{0}
+	f := cmapOnlyFont(t, [][]byte{cmap2Bytes(keys, subs, glyphIndexArray), cmap0Bytes([256]byte{})})
+	if _, ok := f.GlyphIndex(0x41); ok {
+		t.Errorf("0x41 maps to glyph 0, want unmapped")
+	}
+}
+
+func TestCmap14Variation(t *testing.T) {
+	// Base cmap (format 4) maps 'A'(0x41)->1, 'B'(0x42)->2.
+	base := cmap4FromMap(map[rune]uint16{0x41: 1, 0x42: 2})
+	// VS 0xFE00: non-default 0x41 -> glyph 2; default range covering 0x42.
+	// VS 0xFE01: default range covering 0x50 (which the base cmap lacks).
+	vs := cmap14Bytes([]cmap14Selector{
+		{
+			varSelector:   0xFE00,
+			defaultRanges: [][2]uint32{{0x42, 0}}, // 0x42 default -> base cmap
+			nonDefault:    map[uint32]uint16{0x41: 2},
+		},
+		{
+			varSelector:   0xFE01,
+			defaultRanges: [][2]uint32{{0x50, 0}}, // base cmap has no 0x50
+		},
+	})
+	f := cmapOnlyFont(t, [][]byte{base, vs})
+
+	// Ordinary GlyphIndex is unaffected by the format-14 side table.
+	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 1 {
+		t.Errorf("plain 0x41 -> %d,%v want 1,true", gid, ok)
+	}
+
+	// Non-default UVS: (0x41, VS 0xFE00) -> explicit glyph 2.
+	if gid, ok := f.GlyphIndexVariation(0x41, 0xFE00); !ok || gid != 2 {
+		t.Errorf("(0x41,FE00) -> %d,%v want 2,true", gid, ok)
+	}
+	// Default UVS: (0x42, VS 0xFE00) -> resolve through base cmap -> glyph 2.
+	if gid, ok := f.GlyphIndexVariation(0x42, 0xFE00); !ok || gid != 2 {
+		t.Errorf("(0x42,FE00) -> %d,%v want 2,true", gid, ok)
+	}
+	// A base rune in neither the non-default nor default sets: not-ok.
+	if _, ok := f.GlyphIndexVariation(0x43, 0xFE00); ok {
+		t.Errorf("(0x43,FE00) should be unmapped")
+	}
+	// Default UVS whose base rune the ordinary cmap lacks: falls back and
+	// reports the ordinary cmap's not-ok.
+	if _, ok := f.GlyphIndexVariation(0x50, 0xFE01); ok {
+		t.Errorf("(0x50,FE01) base rune absent from cmap, want unmapped")
+	}
+	// An unregistered variation selector: not-ok.
+	if _, ok := f.GlyphIndexVariation(0x41, 0xFE0F); ok {
+		t.Errorf("(0x41,FE0F) unknown selector, want unmapped")
+	}
+}
+
+func TestCmap14NoVSTable(t *testing.T) {
+	// A font with no format-14 subtable: GlyphIndexVariation is always not-ok.
+	f := cmapOnlyFont(t, [][]byte{cmap4FromMap(map[rune]uint16{0x41: 1})})
+	if _, ok := f.GlyphIndexVariation(0x41, 0xFE00); ok {
+		t.Errorf("no format-14 table: GlyphIndexVariation should be unmapped")
+	}
+}
+
+func TestCmapSelectionPrefersRicherFormat(t *testing.T) {
+	// When several base formats coexist, the richest (12 > 4 > 6 > 2 > 0) wins.
+	// Formats 0 and 6 both map 'A', but the format-6 mapping ('A'->2) should
+	// be selected over format 0 ('A'->1).
+	var arr [256]byte
+	arr[0x41] = 1
+	f := cmapOnlyFont(t, [][]byte{cmap0Bytes(arr), cmap6Bytes(0x41, []uint16{2})})
+	if gid, ok := f.GlyphIndex(0x41); !ok || gid != 2 {
+		t.Errorf("richer format-6 should win: 0x41 -> %d,%v want 2,true", gid, ok)
 	}
 }
 
