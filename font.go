@@ -34,6 +34,16 @@ type Font struct {
 	loca             []uint32
 	glyf             []byte
 	cmap             cmapLookup
+
+	// TrueType instruction (hinting) tables and limits. These are optional:
+	// a font without them simply cannot be hinted. See hint.go.
+	fpgm             []byte // font program (function definitions)
+	prep             []byte // control-value program
+	cvt              []int16
+	maxStorage       int
+	maxFunctionDefs  int
+	maxStackElements int
+	maxTwilightPts   int
 }
 
 // be16 reads a big-endian uint16 from b[0:2]; the caller guarantees len(b)>=2.
@@ -115,7 +125,21 @@ func Parse(b []byte) (*Font, error) {
 	if err := f.parseCmap(tables["cmap"]); err != nil {
 		return nil, err
 	}
+	// Optional TrueType instruction tables. Absence is not an error; it just
+	// means the font carries no hinting program (see hint.go).
+	f.fpgm = tables["fpgm"]
+	f.prep = tables["prep"]
+	f.parseCvt(tables["cvt "])
 	return f, nil
+}
+
+// parseCvt decodes the Control Value Table: a run of int16 FUnit values. A
+// missing or odd-length table yields as many whole entries as fit.
+func (f *Font) parseCvt(b []byte) {
+	f.cvt = make([]int16, len(b)/2)
+	for i := range f.cvt {
+		f.cvt[i] = sbe16(b[i*2:])
+	}
 }
 
 // NumGlyphs returns the number of glyphs in the font (from the maxp table).
