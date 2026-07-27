@@ -22,6 +22,7 @@ func (w *bw) u8(v uint8)    { w.b = append(w.b, v) }
 func (w *bw) u16(v uint16)  { w.b = binary.BigEndian.AppendUint16(w.b, v) }
 func (w *bw) u32(v uint32)  { w.b = binary.BigEndian.AppendUint32(w.b, v) }
 func (w *bw) i16(v int16)   { w.u16(uint16(v)) }
+func (w *bw) u24(v uint32)  { w.u8(byte(v >> 16)); w.u8(byte(v >> 8)); w.u8(byte(v)) }
 func (w *bw) bytes() []byte { return w.b }
 
 // bbox writes a zeroed 4-int16 bounding box (the parser skips it).
@@ -362,6 +363,127 @@ func cmap12FromMap(m map[rune]uint16) []byte {
 		w.u32(uint32(g.gid))
 	}
 	return w.bytes()
+}
+
+// cmap0Bytes builds a format-0 cmap subtable from a 256-entry glyph-id array
+// covering code points 0..255.
+func cmap0Bytes(glyphIDArray [256]byte) []byte {
+	w := &bw{}
+	w.u16(0) // format
+	w.u16(0) // length (unused by parser)
+	w.u16(0) // language
+	for _, g := range glyphIDArray {
+		w.u8(g)
+	}
+	return w.bytes()
+}
+
+// cmap6Bytes builds a format-6 cmap subtable covering the contiguous range
+// [firstCode, firstCode+len(glyphIDArray)).
+func cmap6Bytes(firstCode uint16, glyphIDArray []uint16) []byte {
+	w := &bw{}
+	w.u16(6) // format
+	w.u16(0) // length (unused by parser)
+	w.u16(0) // language
+	w.u16(firstCode)
+	w.u16(uint16(len(glyphIDArray)))
+	for _, g := range glyphIDArray {
+		w.u16(g)
+	}
+	return w.bytes()
+}
+
+// cmap2SubHeaderSpec describes one subHeader for the format-2 builder.
+type cmap2SubHeaderSpec struct {
+	firstCode, entryCount uint16
+	idDelta               int16
+	idRangeOffset         uint16
+}
+
+// cmap2Bytes builds a format-2 cmap subtable from explicit subHeaderKeys
+// (256 entries, each a byte offset into subHeaders or 0), subHeaders, and a
+// glyphIndexArray, letting tests craft exact byte layouts including
+// deliberately out-of-range offsets.
+func cmap2Bytes(subHeaderKeys [256]uint16, subHeaders []cmap2SubHeaderSpec, glyphIndexArray []uint16) []byte {
+	w := &bw{}
+	w.u16(2) // format
+	w.u16(0) // length (unused by parser)
+	w.u16(0) // language
+	for _, k := range subHeaderKeys {
+		w.u16(k)
+	}
+	for _, sh := range subHeaders {
+		w.u16(sh.firstCode)
+		w.u16(sh.entryCount)
+		w.i16(sh.idDelta)
+		w.u16(sh.idRangeOffset)
+	}
+	for _, g := range glyphIndexArray {
+		w.u16(g)
+	}
+	return w.bytes()
+}
+
+// cmap14Selector describes one variation-selector record for the format-14
+// builder. defaultRanges are {startUnicodeValue, additionalCount} pairs;
+// nonDefault maps a unicode value directly to a glyph id.
+type cmap14Selector struct {
+	varSelector   uint32
+	defaultRanges [][2]uint32
+	nonDefault    map[uint32]uint16
+}
+
+// cmap14Bytes builds a format-14 (Unicode Variation Sequences) cmap
+// subtable: the header and varSelector records come first, followed by each
+// selector's default and/or non-default UVS table, with offsets computed
+// relative to the start of the subtable (byte 0, the format field).
+func cmap14Bytes(selectors []cmap14Selector) []byte {
+	headerLen := 2 + 4 + 4 + len(selectors)*11 // format+length+numRecords + records(3+4+4 each)
+
+	type recOffsets struct{ defOff, nonDefOff uint32 }
+	offs := make([]recOffsets, len(selectors))
+	body := &bw{}
+	cursor := headerLen
+	for i, sel := range selectors {
+		if len(sel.defaultRanges) > 0 {
+			offs[i].defOff = uint32(cursor)
+			dw := &bw{}
+			dw.u32(uint32(len(sel.defaultRanges)))
+			for _, dr := range sel.defaultRanges {
+				dw.u24(dr[0])
+				dw.u8(byte(dr[1]))
+			}
+			body.b = append(body.b, dw.bytes()...)
+			cursor += len(dw.bytes())
+		}
+		if len(sel.nonDefault) > 0 {
+			offs[i].nonDefOff = uint32(cursor)
+			keys := make([]int, 0, len(sel.nonDefault))
+			for k := range sel.nonDefault {
+				keys = append(keys, int(k))
+			}
+			sort.Ints(keys)
+			nw := &bw{}
+			nw.u32(uint32(len(keys)))
+			for _, k := range keys {
+				nw.u24(uint32(k))
+				nw.u16(sel.nonDefault[uint32(k)])
+			}
+			body.b = append(body.b, nw.bytes()...)
+			cursor += len(nw.bytes())
+		}
+	}
+
+	h := &bw{}
+	h.u16(14) // format
+	h.u32(0)  // length (unused by parser)
+	h.u32(uint32(len(selectors)))
+	for i, sel := range selectors {
+		h.u24(sel.varSelector)
+		h.u32(offs[i].defOff)
+		h.u32(offs[i].nonDefOff)
+	}
+	return append(h.bytes(), body.bytes()...)
 }
 
 // cmapTable wraps one or more subtables into a cmap table with encoding

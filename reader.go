@@ -51,6 +51,18 @@ func (r *reader) u32() uint32 {
 // i16 reads a big-endian signed int16.
 func (r *reader) i16() int16 { return int16(r.u16()) }
 
+// u24 reads a big-endian unsigned 24-bit integer (used by cmap format 14's
+// variation-selector and Unicode-value fields).
+func (r *reader) u24() uint32 {
+	if r.pos+3 > len(r.b) {
+		r.err = errTruncated
+		return 0
+	}
+	v := uint32(r.b[r.pos])<<16 | uint32(r.b[r.pos+1])<<8 | uint32(r.b[r.pos+2])
+	r.pos += 3
+	return v
+}
+
 // f2dot14 reads an F2Dot14 fixed-point value as a float64.
 func (r *reader) f2dot14() float64 { return float64(r.i16()) / 16384.0 }
 
