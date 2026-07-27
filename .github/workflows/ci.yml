@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+  CGO_ENABLED: "0"
+
+jobs:
+  test:
+    name: Build + test + 100% coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.4"
+          check-latest: true
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Test with coverage
+        run: go test -covermode=set -coverprofile=coverage.out ./...
+
+      - name: Assert 100% statement coverage
+        run: |
+          total=$(go tool cover -func=coverage.out | awk 'END { gsub(/%/,"",$3); print $3 }')
+          echo "total coverage: ${total}%"
+          if [ "$(printf '%.0f' "$total")" != "100" ]; then
+            echo "::error::coverage below 100% (got ${total}%)"
+            go tool cover -func=coverage.out | grep -v "100.0%"
+            exit 1
+          fi
+
+      - name: Cross-compile smoke (all 6 64-bit arches + wasm + darwin + windows)
+        run: |
+          for arch in amd64 arm64 riscv64 loong64 ppc64le s390x; do
+            echo "== linux/$arch =="
+            GOOS=linux GOARCH=$arch go build ./...
+          done
+          GOOS=js      GOARCH=wasm  go build ./...
+          GOOS=darwin  GOARCH=arm64 go build ./...
+          GOOS=windows GOARCH=amd64 go build ./...
