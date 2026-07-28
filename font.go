@@ -78,6 +78,29 @@ type Font struct {
 	maxFunctionDefs  int
 	maxStackElements int
 	maxTwilightPts   int
+
+	// Descriptor scalars decoded from head, OS/2 and post at Parse time. They
+	// back the PDF FontDescriptor accessors and general layout use (descriptor.go).
+	xMin, yMin, xMax, yMax int    // head glyph bounding box, font units
+	macStyle               uint16 // head macStyle bits (bit 0 bold, bit 1 italic)
+
+	os2Present   bool   // an OS/2 table was present and long enough to decode
+	os2Version   int    // OS/2 table version (governs the availability of x/CapHeight)
+	weightClass  int    // OS/2 usWeightClass (100..900), 0 when absent
+	widthClass   int    // OS/2 usWidthClass (1..9), 0 when absent
+	sFamilyClass int    // OS/2 sFamilyClass (high byte is the IBM font class)
+	fsSelection  uint16 // OS/2 fsSelection bits (bit 0 italic)
+	sCapHeight   int    // OS/2 sCapHeight, font units (version >= 2), 0 when absent
+	sxHeight     int    // OS/2 sxHeight, font units (version >= 2), 0 when absent
+
+	postPresent  bool    // a post table was present and long enough to decode
+	italicAngle  float64 // post italicAngle (degrees, 0 for upright)
+	isFixedPitch bool    // post isFixedPitch (monospaced)
+
+	// tables retains the raw, undecoded sfnt table slices keyed by four-byte tag,
+	// so callers can read table bytes (Font.Table/Font.TableTags) and the
+	// subsetting/instancing code can rebuild a container (subset.go, instance.go).
+	tables map[string][]byte
 }
 
 // be16 reads a big-endian uint16 from b[0:2]; the caller guarantees len(b)>=2.
@@ -155,7 +178,7 @@ func Parse(b []byte) (*Font, error) {
 		}
 	}
 
-	f := &Font{}
+	f := &Font{tables: tables}
 	if err := f.parseHead(tables["head"]); err != nil {
 		return nil, err
 	}
@@ -223,6 +246,9 @@ func Parse(b []byte) (*Font, error) {
 	if err := f.parseMath(tables); err != nil {
 		return nil, err
 	}
+	// Optional descriptor tables (OS/2, post): the metadata a PDF FontDescriptor
+	// and general styling consume. Absence is not an error (see descriptor.go).
+	f.parseDescriptor(tables)
 	return f, nil
 }
 

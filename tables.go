@@ -16,6 +16,11 @@ func (f *Font) parseHead(b []byte) error {
 	if f.unitsPerEm == 0 {
 		return fmt.Errorf("opentype: head table: unitsPerEm is zero")
 	}
+	f.macStyle = be16(b[44:])
+	f.xMin = int(sbe16(b[36:]))
+	f.yMin = int(sbe16(b[38:]))
+	f.xMax = int(sbe16(b[40:]))
+	f.yMax = int(sbe16(b[42:]))
 	f.indexToLocFormat = int(sbe16(b[50:]))
 	if f.indexToLocFormat != 0 && f.indexToLocFormat != 1 {
 		return fmt.Errorf("opentype: head table: bad indexToLocFormat %d", f.indexToLocFormat)
