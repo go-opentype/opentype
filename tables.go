@@ -32,6 +32,18 @@ func (f *Font) parseMaxp(b []byte) error {
 	if f.numGlyphs == 0 {
 		return fmt.Errorf("opentype: maxp table: zero glyphs")
 	}
+	// Version-1.0 maxp additionally carries the interpreter limits used by the
+	// hinting VM. A shorter (version-0.5) table leaves conservative defaults.
+	f.maxTwilightPts = 16
+	f.maxStorage = 64
+	f.maxFunctionDefs = 64
+	f.maxStackElements = 256
+	if len(b) >= 26 {
+		f.maxTwilightPts = int(be16(b[16:]))
+		f.maxStorage = int(be16(b[18:]))
+		f.maxFunctionDefs = int(be16(b[20:]))
+		f.maxStackElements = int(be16(b[24:]))
+	}
 	return nil
 }
 
