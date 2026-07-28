@@ -29,6 +29,7 @@ type cffTable struct {
 	lsubrBias      int
 	charstringType int
 	sidToGid       map[int]int // charset: string id -> glyph id (for seac)
+	priv           *cffPrivate // Private-DICT hint parameters (blue zones, std widths)
 }
 
 // maxT2Depth bounds callsubr/callgsubr recursion; deeper nesting is rejected as
@@ -275,7 +276,7 @@ func parseCFF(data []byte) (*cffTable, error) {
 		return nil, err
 	}
 
-	localSubrs, err := parseLocalSubrs(data, top)
+	localSubrs, priv, err := parseLocalSubrs(data, top)
 	if err != nil {
 		return nil, err
 	}
@@ -294,6 +295,7 @@ func parseCFF(data []byte) (*cffTable, error) {
 		lsubrBias:      subrBias(len(localSubrs)),
 		charstringType: cst,
 		sidToGid:       sidToGid,
+		priv:           priv,
 	}, nil
 }
 
@@ -349,33 +351,40 @@ func parseCharset(data []byte, off, nGlyphs int) (map[int]int, error) {
 	return m, nil
 }
 
-// parseLocalSubrs resolves the Private DICT referenced by the Top DICT and, if
-// it declares a Subrs offset, decodes the Local Subr INDEX.
-func parseLocalSubrs(data []byte, top map[int][]float64) ([][]byte, error) {
+// parseLocalSubrs resolves the Private DICT referenced by the Top DICT: it
+// parses the Private-DICT hint parameters (blue zones, standard/snap stem
+// widths) and, if the DICT declares a Subrs offset, decodes the Local Subr
+// INDEX. A font with no Private DICT yields nil hints and no local subrs.
+func parseLocalSubrs(data []byte, top map[int][]float64) ([][]byte, *cffPrivate, error) {
 	pv, ok := top[18]
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(pv) < 2 {
-		return nil, fmt.Errorf("opentype: cff: bad Private DICT entry")
+		return nil, nil, fmt.Errorf("opentype: cff: bad Private DICT entry")
 	}
 	psize, poff := int(pv[0]), int(pv[1])
 	if psize < 0 || poff < 0 || poff+psize > len(data) {
-		return nil, fmt.Errorf("opentype: cff: Private DICT out of range")
+		return nil, nil, fmt.Errorf("opentype: cff: Private DICT out of range")
 	}
 	priv, err := parseDict(data[poff : poff+psize])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	hints := parsePrivateHints(priv)
 	soff, ok := dictInt(priv, 19, 0)
 	if !ok {
-		return nil, nil
+		return nil, hints, nil
 	}
 	soff += poff
 	if soff < 0 || soff > len(data) {
-		return nil, fmt.Errorf("opentype: cff: Local Subrs offset out of range")
+		return nil, nil, fmt.Errorf("opentype: cff: Local Subrs offset out of range")
 	}
-	return parseIndex(&reader{b: data, pos: soff})
+	ls, err := parseIndex(&reader{b: data, pos: soff})
+	if err != nil {
+		return nil, nil, err
+	}
+	return ls, hints, nil
 }
 
 // t2machine is the Type2 charstring interpreter state for one glyph: the
@@ -392,6 +401,12 @@ type t2machine struct {
 	widthDone bool
 	done      bool
 	seacDepth int // endchar-seac accent-composition recursion depth
+
+	// Hinting data recorded during interpretation for the grid-fitter (cffhint.go):
+	// the resolved stem-edge positions in font units (in declaration order, which
+	// is the order hintmask/cntrmask bits index) and the per-hintmask activation.
+	stemHints []cffStemHint
+	hintMasks []cffHintMask
 }
 
 // outline interprets glyph gid's Type2 charstring into its outline as a set of
@@ -400,9 +415,11 @@ func (c *cffTable) outline(gid int) ([]contour, error) {
 	return c.outlineSeac(gid, 0)
 }
 
-// outlineSeac is outline with an explicit endchar-seac recursion depth so that
-// a seac's base and accent components (themselves glyphs) can be composed.
-func (c *cffTable) outlineSeac(gid, seacDepth int) ([]contour, error) {
+// runGlyph interprets glyph gid's Type2 charstring and returns the finished
+// interpreter, from which the outline (m.contours) and the recorded hinting
+// data (m.stemHints, m.hintMasks) can both be read. seacDepth carries the
+// endchar-seac recursion depth so a seac's components can be composed.
+func (c *cffTable) runGlyph(gid, seacDepth int) (*t2machine, error) {
 	if gid < 0 || gid >= len(c.charStrings) {
 		return nil, fmt.Errorf("opentype: cff glyph %d out of range", gid)
 	}
@@ -411,7 +428,28 @@ func (c *cffTable) outlineSeac(gid, seacDepth int) ([]contour, error) {
 		return nil, err
 	}
 	m.finishContour()
+	return m, nil
+}
+
+// outlineSeac is outline with an explicit endchar-seac recursion depth so that
+// a seac's base and accent components (themselves glyphs) can be composed.
+func (c *cffTable) outlineSeac(gid, seacDepth int) ([]contour, error) {
+	m, err := c.runGlyph(gid, seacDepth)
+	if err != nil {
+		return nil, err
+	}
 	return m.contours, nil
+}
+
+// outlineHints interprets glyph gid and returns its outline together with the
+// hinting data (recorded stems, per-hintmask activation and the font's parsed
+// Private-DICT hint parameters) that cffhint.go's grid-fitter consumes.
+func (c *cffTable) outlineHints(gid int) ([]contour, *cffGlyphHints, error) {
+	m, err := c.runGlyph(gid, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.contours, &cffGlyphHints{stems: m.stemHints, hintMasks: m.hintMasks, priv: c.priv}, nil
 }
 
 // push appends v to the operand stack, guarding the stack-depth limit.
@@ -546,14 +584,14 @@ func (m *t2machine) operand(code []byte, i int) (float64, int, error) {
 func (m *t2machine) operator(b0 byte, code []byte, i, depth int) (stop bool, ni int, err error) {
 	switch b0 {
 	case 1, 3, 18, 23: // hstem, vstem, hstemhm, vstemhm
-		m.stems()
+		m.stems(b0 == 1 || b0 == 18)
 	case 19, 20: // hintmask, cntrmask
-		m.stems()
-		nb := (m.nStems + 7) / 8
-		if i+nb > len(code) {
-			return false, i, fmt.Errorf("opentype: cff charstring: %w", errTruncated)
+		m.stems(false) // any operands here are implicit vstem hints
+		ni, herr := m.readHintMask(code, i, b0 == 19)
+		if herr != nil {
+			return false, i, herr
 		}
-		i += nb
+		i = ni
 	case 21: // rmoveto
 		m.width(true)
 		if len(m.stack) < 2 {
@@ -637,12 +675,67 @@ func (m *t2machine) operator(b0 byte, code []byte, i, depth int) (stop bool, ni 
 	return false, i, nil
 }
 
-// stems handles a stem-hint operator: strip a leading width once, add the
-// declared stem pairs to the hint count, and clear the stack.
-func (m *t2machine) stems() {
+// stems handles a stem-hint operator: strip a leading width once, then record
+// the declared stem pairs (which also advances the hint count and clears the
+// stack). horizontal selects hstem (edges are Y positions) versus vstem (X).
+func (m *t2machine) stems(horizontal bool) {
 	m.width(true)
-	m.nStems += len(m.stack) / 2
+	m.recordStems(horizontal)
+}
+
+// recordStems resolves the operand pairs into absolute stem-edge positions in
+// font units and appends them to m.stemHints, advancing the hint count and
+// clearing the stack. Each pair is (edgeDelta, width); the first edge is
+// relative to the glyph origin and each subsequent edge is relative to the
+// previous stem's far edge, per the Type2 stem-hint encoding. It records the
+// positions without the leading-width handling that stems does, so it is safe
+// to reuse from CFF2 (which has no per-glyph width).
+func (m *t2machine) recordStems(horizontal bool) {
+	s := m.stack
+	pos := 0.0
+	for j := 0; j+1 < len(s); j += 2 {
+		lo := pos + s[j]
+		hi := lo + s[j+1]
+		m.stemHints = append(m.stemHints, cffStemHint{horizontal: horizontal, min: lo, max: hi})
+		pos = hi
+	}
+	m.nStems += len(s) / 2
 	m.clear()
+}
+
+// readHintMask consumes a hintmask/cntrmask operator's mask bytes at code[i]
+// (one bit per declared stem, high bit first) and returns the stream index just
+// past them. When record is true (a hintmask, operator 19) the activated stem
+// set is captured together with the point count reached so far, so the
+// grid-fitter can apply each subpath's active hints; a cntrmask (operator 20)
+// passes record false — its counter-control groups are parsed but not applied
+// (see cffhint.go).
+func (m *t2machine) readHintMask(code []byte, i int, record bool) (int, error) {
+	nb := (m.nStems + 7) / 8
+	if i+nb > len(code) {
+		return i, fmt.Errorf("opentype: cff hintmask: %w", errTruncated)
+	}
+	if record {
+		active := make([]bool, m.nStems)
+		for k := 0; k < m.nStems; k++ {
+			if code[i+k/8]&(0x80>>(uint(k)%8)) != 0 {
+				active[k] = true
+			}
+		}
+		m.hintMasks = append(m.hintMasks, cffHintMask{pointIndex: m.pointCount(), active: active})
+	}
+	return i + nb, nil
+}
+
+// pointCount returns the number of outline points emitted so far (finished
+// contours plus the contour under construction), used to stamp each hintmask
+// with the subpath position at which it takes effect.
+func (m *t2machine) pointCount() int {
+	n := len(m.cur)
+	for _, c := range m.contours {
+		n += len(c)
+	}
+	return n
 }
 
 // callSubr executes the subroutine selected by the top-of-stack index (plus the
