@@ -150,6 +150,32 @@ func (fc *Face) GlyphMask(r rune, x, y int) (bounds image.Rectangle, mask *image
 	return bounds, cg.mask, image.Point{}, advance, true
 }
 
+// GlyphMaskIndex rasterises the glyph with index gid directly — bypassing the
+// cmap — and positions it with (x, y) as the pen origin on the baseline. It is
+// the by-glyph-index counterpart of [Face.GlyphMask]: a complex-text shaper
+// (see github.com/go-opentype/shape) emits glyph indices after applying GSUB
+// substitutions and GPOS positioning, so the runes have already been resolved
+// to glyphs and a caller must render each glyph by its index rather than by a
+// rune. Callers add the shaper's per-glyph pixel offset to (x, y) before the
+// call and advance the pen by the shaper's advance afterwards.
+//
+// It returns the destination bounds, an *image.Alpha coverage mask, the offset
+// into that mask corresponding to bounds.Min (always the origin), the glyph's
+// own horizontal advance width in pixels, and ok.
+//
+// ok is false when gid is out of range or its outline is corrupt; callers
+// should render nothing in that case. A valid-but-empty glyph (for example a
+// space) returns ok true with a nil mask, an empty bounds, and its advance.
+func (fc *Face) GlyphMaskIndex(gid GlyphIndex, x, y int) (bounds image.Rectangle, mask *image.Alpha, maskp image.Point, advance int, ok bool) {
+	cg := fc.glyph(gid)
+	if !cg.ok {
+		return image.Rectangle{}, nil, image.Point{}, 0, false
+	}
+	advance = roundInt(float64(fc.font.GlyphAdvance(gid)) * fc.scale)
+	bounds = cg.bounds.Add(image.Point{X: x, Y: y})
+	return bounds, cg.mask, image.Point{}, advance, true
+}
+
 // outline returns glyph gid's outline as contours in font units, selecting the
 // outline source (CFF2 vs CFF vs glyf), applying variable-font instancing when a
 // variation is set, and applying hinting when it is enabled.
