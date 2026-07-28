@@ -1029,7 +1029,7 @@ func parseContextPos3(b []byte) (posSubtable, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: contextpos3: %w", r.err)
 	}
-	covs, err := parseCoverageList(b, covOffs)
+	covs, err := parsePosCoverageList(b, covOffs)
 	if err != nil {
 		return nil, err
 	}
@@ -1050,9 +1050,9 @@ func (c *contextPos3) apply(ctx *posContext, i int) bool {
 	return true
 }
 
-// parseCoverageList decodes a slice of Coverage tables at the given offsets from
+// parsePosCoverageList decodes a slice of Coverage tables at the given offsets from
 // the start of b.
-func parseCoverageList(b []byte, offs []int) ([]map[GlyphIndex]int, error) {
+func parsePosCoverageList(b []byte, offs []int) ([]map[GlyphIndex]int, error) {
 	covs := make([]map[GlyphIndex]int, len(offs))
 	for i, off := range offs {
 		cov, err := parseCoverage(subslice(b, off))
@@ -1064,8 +1064,8 @@ func parseCoverageList(b []byte, offs []int) ([]map[GlyphIndex]int, error) {
 	return covs, nil
 }
 
-// chainRule is one chaining contextual (type 8 format 1) rule.
-type chainRule struct {
+// posChainRule is one chaining contextual (type 8 format 1) rule.
+type posChainRule struct {
 	back  []GlyphIndex
 	input []GlyphIndex
 	ahead []GlyphIndex
@@ -1075,7 +1075,7 @@ type chainRule struct {
 // chainPos1 is a chaining contextual positioning format 1 subtable.
 type chainPos1 struct {
 	cov  map[GlyphIndex]int
-	sets [][]chainRule
+	sets [][]posChainRule
 }
 
 // chainPos3 is a chaining contextual positioning format 3 subtable.
@@ -1123,9 +1123,9 @@ func parseChainPos1(b []byte) (posSubtable, error) {
 	if err != nil {
 		return nil, err
 	}
-	sets := make([][]chainRule, n)
+	sets := make([][]posChainRule, n)
 	for i, so := range setOffs {
-		rs, err := parseChainRuleSet(subslice(b, so))
+		rs, err := parsePosChainRuleSet(subslice(b, so))
 		if err != nil {
 			return nil, err
 		}
@@ -1134,8 +1134,8 @@ func parseChainPos1(b []byte) (posSubtable, error) {
 	return &chainPos1{cov: cov, sets: sets}, nil
 }
 
-// parseChainRuleSet decodes a ChainPosRuleSet table.
-func parseChainRuleSet(b []byte) ([]chainRule, error) {
+// parsePosChainRuleSet decodes a ChainPosRuleSet table.
+func parsePosChainRuleSet(b []byte) ([]posChainRule, error) {
 	r := reader{b: b}
 	n := int(r.u16())
 	offs := make([]int, n)
@@ -1145,9 +1145,9 @@ func parseChainRuleSet(b []byte) ([]chainRule, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: chainRuleSet: %w", r.err)
 	}
-	rules := make([]chainRule, n)
+	rules := make([]posChainRule, n)
 	for i, off := range offs {
-		rule, err := parseChainRule(subslice(b, off))
+		rule, err := parsePosChainRule(subslice(b, off))
 		if err != nil {
 			return nil, err
 		}
@@ -1156,8 +1156,8 @@ func parseChainRuleSet(b []byte) ([]chainRule, error) {
 	return rules, nil
 }
 
-// parseChainRule decodes one ChainPosRule table.
-func parseChainRule(b []byte) (chainRule, error) {
+// parsePosChainRule decodes one ChainPosRule table.
+func parsePosChainRule(b []byte) (posChainRule, error) {
 	r := reader{b: b}
 	bn := int(r.u16())
 	back := make([]GlyphIndex, bn)
@@ -1177,9 +1177,9 @@ func parseChainRule(b []byte) (chainRule, error) {
 	ln := int(r.u16())
 	recs := readPosLookupRecords(&r, ln)
 	if r.err != nil {
-		return chainRule{}, fmt.Errorf("opentype: chainRule: %w", r.err)
+		return posChainRule{}, fmt.Errorf("opentype: posChainRule: %w", r.err)
 	}
-	return chainRule{back: back, input: input, ahead: ahead, recs: recs}, nil
+	return posChainRule{back: back, input: input, ahead: ahead, recs: recs}, nil
 }
 
 func (c *chainPos1) apply(ctx *posContext, i int) bool {
@@ -1216,15 +1216,15 @@ func parseChainPos3(b []byte) (posSubtable, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: chainpos3: %w", r.err)
 	}
-	back, err := parseCoverageList(b, backOffs)
+	back, err := parsePosCoverageList(b, backOffs)
 	if err != nil {
 		return nil, err
 	}
-	input, err := parseCoverageList(b, inputOffs)
+	input, err := parsePosCoverageList(b, inputOffs)
 	if err != nil {
 		return nil, err
 	}
-	ahead, err := parseCoverageList(b, aheadOffs)
+	ahead, err := parsePosCoverageList(b, aheadOffs)
 	if err != nil {
 		return nil, err
 	}
