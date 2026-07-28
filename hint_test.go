@@ -174,8 +174,8 @@ func wantStack(t *testing.T, got []int32, want ...int32) {
 	}
 }
 
-// wantErr executes prog expecting an error containing sub.
-func wantErr(t *testing.T, it *interp, prog []byte, sub string) {
+// wantHintErr executes prog expecting an error containing sub.
+func wantHintErr(t *testing.T, it *interp, prog []byte, sub string) {
 	t.Helper()
 	it.stack = it.stack[:0]
 	it.err = nil
@@ -201,18 +201,18 @@ func TestPushes(t *testing.T) {
 
 func TestPushTruncation(t *testing.T) {
 	it := freshInterp()
-	wantErr(t, it, []byte{opNPUSHB}, "truncated")       // missing count
-	wantErr(t, it, []byte{opNPUSHB, 3, 1}, "truncated") // short data
-	wantErr(t, it, []byte{opNPUSHW}, "truncated")       // missing count
-	wantErr(t, it, []byte{opNPUSHW, 2, 0}, "truncated") // short data
-	wantErr(t, it, []byte{opPUSHB2, 1}, "truncated")    // fixed short
-	wantErr(t, it, []byte{opPUSHW1, 1}, "truncated")    // fixed short word
+	wantHintErr(t, it, []byte{opNPUSHB}, "truncated")       // missing count
+	wantHintErr(t, it, []byte{opNPUSHB, 3, 1}, "truncated") // short data
+	wantHintErr(t, it, []byte{opNPUSHW}, "truncated")       // missing count
+	wantHintErr(t, it, []byte{opNPUSHW, 2, 0}, "truncated") // short data
+	wantHintErr(t, it, []byte{opPUSHB2, 1}, "truncated")    // fixed short
+	wantHintErr(t, it, []byte{opPUSHW1, 1}, "truncated")    // fixed short word
 }
 
 func TestPushOverflow(t *testing.T) {
 	it := freshInterp()
 	it.maxStack = 2
-	wantErr(t, it, pb(1, 2, 3), "overflow")
+	wantHintErr(t, it, pb(1, 2, 3), "overflow")
 }
 
 // --- stack manipulation -----------------------------------------------------
@@ -234,12 +234,12 @@ func TestStackOps(t *testing.T) {
 
 func TestStackUnderflow(t *testing.T) {
 	it := freshInterp()
-	wantErr(t, it, []byte{opPOP}, "underflow")
-	wantErr(t, it, []byte{opADD}, "underflow")
+	wantHintErr(t, it, []byte{opPOP}, "underflow")
+	wantHintErr(t, it, []byte{opADD}, "underflow")
 	// CINDEX with bad index (pop error, then arg <=0/>n)
-	wantErr(t, it, []byte{opCINDEX}, "underflow")
-	wantErr(t, it, cat(pb(1), pb(5), []byte{opCINDEX}), "underflow") // k>n
-	wantErr(t, it, cat(pb(1), pb(0), []byte{opCINDEX}), "underflow") // k<=0
+	wantHintErr(t, it, []byte{opCINDEX}, "underflow")
+	wantHintErr(t, it, cat(pb(1), pb(5), []byte{opCINDEX}), "underflow") // k>n
+	wantHintErr(t, it, cat(pb(1), pb(0), []byte{opCINDEX}), "underflow") // k<=0
 }
 
 // --- arithmetic and logic ---------------------------------------------------
@@ -264,7 +264,7 @@ func TestArithmetic(t *testing.T) {
 	for _, c := range cases {
 		wantStack(t, runOps(t, it, c.prog), c.want)
 	}
-	wantErr(t, it, cat(pw(5, 0), []byte{opDIV}), "division by zero")
+	wantHintErr(t, it, cat(pw(5, 0), []byte{opDIV}), "division by zero")
 }
 
 func TestLogic(t *testing.T) {
@@ -308,9 +308,9 @@ func TestIfElse(t *testing.T) {
 	prog = cat(pw(0), []byte{opIF}, pw(1), []byte{opIF}, pb(1), []byte{opEIF}, []byte{opEIF}, pb(3))
 	wantStack(t, runOps(t, it, prog), 3)
 	// IF with empty condition underflows.
-	wantErr(t, it, []byte{opIF}, "underflow")
+	wantHintErr(t, it, []byte{opIF}, "underflow")
 	// Unterminated IF (no EIF) is a truncated program.
-	wantErr(t, it, cat(pw(0), []byte{opIF}, pb(1)), "truncated")
+	wantHintErr(t, it, cat(pw(0), []byte{opIF}, pb(1)), "truncated")
 }
 
 func TestJumps(t *testing.T) {
@@ -331,10 +331,10 @@ func TestJumps(t *testing.T) {
 	prog = cat(pw(3), pw(0), []byte{opJROF, opPUSHB1, 9, opPUSHB1, 7})
 	wantStack(t, runOps(t, it, prog), 7)
 	// Jump target out of range.
-	wantErr(t, it, cat(pw(9999), []byte{opJMPR}), "truncated")
+	wantHintErr(t, it, cat(pw(9999), []byte{opJMPR}), "truncated")
 	// Jump with empty stack underflows.
-	wantErr(t, it, []byte{opJMPR}, "underflow")
-	wantErr(t, it, cat(pw(1), []byte{opJROT}), "underflow") // only bool, no offset
+	wantHintErr(t, it, []byte{opJMPR}, "underflow")
+	wantHintErr(t, it, cat(pw(1), []byte{opJROT}), "underflow") // only bool, no offset
 }
 
 func TestBudget(t *testing.T) {
@@ -366,12 +366,12 @@ func TestFunctions(t *testing.T) {
 
 func TestFunctionErrors(t *testing.T) {
 	it := freshInterp()
-	wantErr(t, it, []byte{opFDEF}, "underflow")                      // no id
-	wantErr(t, it, cat(pb(1), []byte{opFDEF}, pb(2)), "truncated")   // no ENDF
-	wantErr(t, it, cat(pb(9), []byte{opCALL}), "undefined function") // undefined
-	wantErr(t, it, []byte{opCALL}, "underflow")                      // CALL no id
-	wantErr(t, it, cat(pb(1), []byte{opLOOPCALL}), "underflow")      // LOOPCALL missing count
-	wantErr(t, it, cat(pb(1, 9), []byte{opLOOPCALL}), "undefined")   // LOOPCALL undefined
+	wantHintErr(t, it, []byte{opFDEF}, "underflow")                      // no id
+	wantHintErr(t, it, cat(pb(1), []byte{opFDEF}, pb(2)), "truncated")   // no ENDF
+	wantHintErr(t, it, cat(pb(9), []byte{opCALL}), "undefined function") // undefined
+	wantHintErr(t, it, []byte{opCALL}, "underflow")                      // CALL no id
+	wantHintErr(t, it, cat(pb(1), []byte{opLOOPCALL}), "underflow")      // LOOPCALL missing count
+	wantHintErr(t, it, cat(pb(1, 9), []byte{opLOOPCALL}), "undefined")   // LOOPCALL undefined
 }
 
 func TestLoopCallPropagatesError(t *testing.T) {
@@ -379,7 +379,7 @@ func TestLoopCallPropagatesError(t *testing.T) {
 	// Function 5 pops from an empty stack -> underflow inside the loop body.
 	def := cat(pb(5), []byte{opFDEF}, []byte{opPOP}, []byte{opENDF})
 	prog := cat(def, pb(1, 5), []byte{opLOOPCALL})
-	wantErr(t, it, prog, "underflow")
+	wantHintErr(t, it, prog, "underflow")
 }
 
 func TestCallDepth(t *testing.T) {
@@ -387,7 +387,7 @@ func TestCallDepth(t *testing.T) {
 	// Function 1 calls itself: recursion hits the call-depth guard.
 	def := cat(pb(1), []byte{opFDEF}, pb(1), []byte{opCALL}, []byte{opENDF})
 	prog := cat(def, pb(1), []byte{opCALL})
-	wantErr(t, it, prog, "call nesting too deep")
+	wantHintErr(t, it, prog, "call nesting too deep")
 }
 
 func TestIDEF(t *testing.T) {
@@ -396,14 +396,14 @@ func TestIDEF(t *testing.T) {
 	def := cat(pb(0x92), []byte{opIDEF}, pb(99), []byte{opENDF})
 	wantStack(t, runOps(t, it, cat(def, []byte{0x92})), 99)
 	// IDEF errors.
-	wantErr(t, it, []byte{opIDEF}, "underflow")
-	wantErr(t, it, cat(pb(0x93), []byte{opIDEF}, pb(1)), "truncated")
+	wantHintErr(t, it, []byte{opIDEF}, "underflow")
+	wantHintErr(t, it, cat(pb(0x93), []byte{opIDEF}, pb(1)), "truncated")
 }
 
 func TestUnimplementedOpcode(t *testing.T) {
 	it := freshInterp()
 	// 0x56 (ODD) is deliberately not implemented and has no IDEF.
-	wantErr(t, it, []byte{0x56}, "unimplemented opcode 0x56")
+	wantHintErr(t, it, []byte{0x56}, "unimplemented opcode 0x56")
 }
 
 // --- storage ----------------------------------------------------------------
@@ -412,10 +412,10 @@ func TestStorage(t *testing.T) {
 	it := freshInterp()
 	// WS[3]=77 then RS[3] -> 77.
 	wantStack(t, runOps(t, it, cat(pb(3, 77), []byte{opWS}, pb(3), []byte{opRS})), 77)
-	wantErr(t, it, cat(pb(99), []byte{opRS}), "storage read out of range")
-	wantErr(t, it, cat(pb(99, 1), []byte{opWS}), "storage write out of range")
-	wantErr(t, it, []byte{opRS}, "underflow")
-	wantErr(t, it, []byte{opWS}, "underflow")
+	wantHintErr(t, it, cat(pb(99), []byte{opRS}), "storage read out of range")
+	wantHintErr(t, it, cat(pb(99, 1), []byte{opWS}), "storage write out of range")
+	wantHintErr(t, it, []byte{opRS}, "underflow")
+	wantHintErr(t, it, []byte{opWS}, "underflow")
 }
 
 // --- CVT --------------------------------------------------------------------
@@ -427,8 +427,8 @@ func TestCVTops(t *testing.T) {
 	// WCVTF scales font units by scale (16/1000) into F26Dot6.
 	// 1000 funits -> 16 px -> 1024 in 26.6.
 	wantStack(t, runOps(t, it, cat(pw(2, 1000), []byte{opWCVTF}, pb(2), []byte{opRCVT})), 1024)
-	wantErr(t, it, cat(pb(99), []byte{opRCVT}), "CVT read out of range")
-	wantErr(t, it, cat(pw(99, 1), []byte{opWCVTP}), "CVT write out of range")
+	wantHintErr(t, it, cat(pb(99), []byte{opRCVT}), "CVT read out of range")
+	wantHintErr(t, it, cat(pw(99, 1), []byte{opWCVTP}), "CVT write out of range")
 }
 
 // --- graphics-state setters -------------------------------------------------
@@ -489,8 +489,8 @@ func TestAxisAndZoneSetters(t *testing.T) {
 	if it.zp0 != 1 || it.zp1 != 1 || it.zp2 != 1 {
 		t.Errorf("SZPS: %d %d %d", it.zp0, it.zp1, it.zp2)
 	}
-	wantErr(t, it, cat(pb(2), []byte{opSZP0}), "bad zone pointer")
-	wantErr(t, it, []byte{opSZP0}, "underflow")
+	wantHintErr(t, it, cat(pb(2), []byte{opSZP0}), "bad zone pointer")
+	wantHintErr(t, it, []byte{opSZP0}, "underflow")
 }
 
 func TestRoundModes(t *testing.T) {
@@ -544,7 +544,7 @@ func TestSuperRound(t *testing.T) {
 	if it.round.mode != rndGrid {
 		t.Errorf("S45ROUND mode=%v", it.round.mode)
 	}
-	wantErr(t, it, []byte{opSROUND}, "underflow")
+	wantHintErr(t, it, []byte{opSROUND}, "underflow")
 }
 
 // --- point measurement and movement -----------------------------------------
@@ -566,7 +566,7 @@ func TestGC_SCFS(t *testing.T) {
 	if it.glyphZone[0].curX != 128 {
 		t.Errorf("SCFS: curX=%d want 128", it.glyphZone[0].curX)
 	}
-	wantErr(t, it, cat(pb(9), []byte{opGCcur}), "out of range")
+	wantHintErr(t, it, cat(pb(9), []byte{opGCcur}), "out of range")
 }
 
 func TestMDAP(t *testing.T) {
@@ -586,7 +586,7 @@ func TestMDAP(t *testing.T) {
 	if it.glyphZone[0].curX != 96 || !it.glyphZone[0].tx {
 		t.Errorf("MDAP[0]: curX=%d tx=%v", it.glyphZone[0].curX, it.glyphZone[0].tx)
 	}
-	wantErr(t, it, cat(pb(9), []byte{opMDAPr}), "out of range")
+	wantHintErr(t, it, cat(pb(9), []byte{opMDAPr}), "out of range")
 }
 
 func TestMIAP(t *testing.T) {
@@ -614,7 +614,7 @@ func TestMIAP(t *testing.T) {
 		t.Errorf("MIAP twilight: curX=%d want 200", it.twilight[0].curX)
 	}
 	it.zp0 = 1
-	wantErr(t, it, cat(pb(9, 1), []byte{opMIAPr}), "out of range")
+	wantHintErr(t, it, cat(pb(9, 1), []byte{opMIAPr}), "out of range")
 }
 
 func TestMDRP(t *testing.T) {
@@ -654,7 +654,7 @@ func TestMDRP(t *testing.T) {
 	if it.glyphZone[1].curX != -64 {
 		t.Errorf("MDRP negmin: curX=%d want -64", it.glyphZone[1].curX)
 	}
-	wantErr(t, it, cat(pb(9), []byte{0xC0}), "out of range")
+	wantHintErr(t, it, cat(pb(9), []byte{0xC0}), "out of range")
 }
 
 func TestMIRP(t *testing.T) {
@@ -685,7 +685,7 @@ func TestMIRP(t *testing.T) {
 	if it.rp0 != 1 {
 		t.Errorf("MIRP setRP0: rp0=%d", it.rp0)
 	}
-	wantErr(t, it, cat(pb(9, 0), []byte{0xE0}), "out of range")
+	wantHintErr(t, it, cat(pb(9, 0), []byte{0xE0}), "out of range")
 }
 
 func TestSHPIX(t *testing.T) {
@@ -701,7 +701,7 @@ func TestSHPIX(t *testing.T) {
 		t.Errorf("SHPIX should reset loop, got %d", it.loop)
 	}
 	it.loop = 1
-	wantErr(t, it, cat(pb(9), pw(1), []byte{opSHPIX}), "out of range")
+	wantHintErr(t, it, cat(pb(9), pw(1), []byte{opSHPIX}), "out of range")
 }
 
 func TestSHP(t *testing.T) {
@@ -728,10 +728,10 @@ func TestSHP(t *testing.T) {
 	}
 	// Bad reference point.
 	it.rp1 = 99
-	wantErr(t, it, cat(pb(1), []byte{opSHP1}), "out of range")
+	wantHintErr(t, it, cat(pb(1), []byte{opSHP1}), "out of range")
 	// Bad looped point.
 	it.rp1 = 0
-	wantErr(t, it, cat(pb(99), []byte{opSHP1}), "out of range")
+	wantHintErr(t, it, cat(pb(99), []byte{opSHP1}), "out of range")
 }
 
 func TestALIGNRP(t *testing.T) {
@@ -746,9 +746,9 @@ func TestALIGNRP(t *testing.T) {
 		t.Errorf("ALIGNRP: curX=%d want 64", it.glyphZone[1].curX)
 	}
 	it.rp0 = 99
-	wantErr(t, it, cat(pb(1), []byte{opALIGNRP}), "out of range")
+	wantHintErr(t, it, cat(pb(1), []byte{opALIGNRP}), "out of range")
 	it.rp0 = 0
-	wantErr(t, it, cat(pb(99), []byte{opALIGNRP}), "out of range")
+	wantHintErr(t, it, cat(pb(99), []byte{opALIGNRP}), "out of range")
 }
 
 func TestIP(t *testing.T) {
@@ -776,9 +776,9 @@ func TestIP(t *testing.T) {
 		t.Errorf("IP shift: curX=%d want 45", it.glyphZone[2].curX)
 	}
 	it.rp1 = 99
-	wantErr(t, it, cat(pb(0), []byte{opIP}), "out of range")
+	wantHintErr(t, it, cat(pb(0), []byte{opIP}), "out of range")
 	it.rp1 = 0
-	wantErr(t, it, cat(pb(99), []byte{opIP}), "out of range")
+	wantHintErr(t, it, cat(pb(99), []byte{opIP}), "out of range")
 }
 
 func TestIUP(t *testing.T) {
@@ -847,9 +847,9 @@ func TestDeltaP(t *testing.T) {
 		t.Errorf("DELTAP1 skip: curX=%d want 0", it.glyphZone[0].curX)
 	}
 	// Errors: bad count / bad operands / bad point.
-	wantErr(t, it, []byte{opDELTAP1}, "underflow")
-	wantErr(t, it, cat(pb(1), []byte{opDELTAP1}), "underflow")
-	wantErr(t, it, cat(pb(0x78, 9, 1), []byte{opDELTAP1}), "out of range")
+	wantHintErr(t, it, []byte{opDELTAP1}, "underflow")
+	wantHintErr(t, it, cat(pb(1), []byte{opDELTAP1}), "underflow")
+	wantHintErr(t, it, cat(pb(0x78, 9, 1), []byte{opDELTAP1}), "out of range")
 }
 
 func TestDeltaC(t *testing.T) {
@@ -867,9 +867,9 @@ func TestDeltaC(t *testing.T) {
 	if it.cvt[0] != 108 {
 		t.Errorf("DELTAC1 skip changed cvt: %d", it.cvt[0])
 	}
-	wantErr(t, it, []byte{opDELTAC1}, "underflow")
-	wantErr(t, it, cat(pb(1), []byte{opDELTAC1}), "underflow")
-	wantErr(t, it, cat(pb(0x78, 99, 1), []byte{opDELTAC1}), "CVT read out of range")
+	wantHintErr(t, it, []byte{opDELTAC1}, "underflow")
+	wantHintErr(t, it, cat(pb(1), []byte{opDELTAC1}), "underflow")
+	wantHintErr(t, it, cat(pb(0x78, 99, 1), []byte{opDELTAC1}), "CVT read out of range")
 }
 
 func TestDeltaStepNegative(t *testing.T) {
@@ -894,7 +894,7 @@ func TestInfoOps(t *testing.T) {
 	wantStack(t, runOps(t, it, cat(pb(1), []byte{opGETINFO})), 42)
 	// GETINFO grayscale bit -> 0x1000.
 	wantStack(t, runOps(t, it, cat(pb(0x20), []byte{opGETINFO})), 1<<12)
-	wantErr(t, it, []byte{opGETINFO}, "underflow")
+	wantHintErr(t, it, []byte{opGETINFO}, "underflow")
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -1073,26 +1073,26 @@ func TestOpLenInSkip(t *testing.T) {
 	prog := cat(pw(0), []byte{opIF, opPUSHB1, 9, opPUSHW1, 0x00, 0x05, opEIF}, pb(7))
 	wantStack(t, runOps(t, it, prog), 7)
 	// Truncated NPUSHB / NPUSHW inside the skipped branch -> opLen returns -1.
-	wantErr(t, it, cat(pw(0), []byte{opIF, opNPUSHB}), "truncated")
-	wantErr(t, it, cat(pw(0), []byte{opIF, opNPUSHW}), "truncated")
+	wantHintErr(t, it, cat(pw(0), []byte{opIF, opNPUSHB}), "truncated")
+	wantHintErr(t, it, cat(pw(0), []byte{opIF, opNPUSHW}), "truncated")
 }
 
 func TestScanFDEFTruncatedPush(t *testing.T) {
 	it := freshInterp()
 	// A function body with a truncated NPUSHB before ENDF -> scanFDEF errors.
-	wantErr(t, it, cat(pb(1), []byte{opFDEF, opNPUSHB}), "truncated")
+	wantHintErr(t, it, cat(pb(1), []byte{opFDEF, opNPUSHB}), "truncated")
 }
 
 func TestWriteCVTUnderflow(t *testing.T) {
 	it := freshInterp()
 	// WCVTP with an empty stack underflows before the CVT write.
-	wantErr(t, it, []byte{opWCVTP}, "underflow")
+	wantHintErr(t, it, []byte{opWCVTP}, "underflow")
 }
 
 func TestSCFSBadPoint(t *testing.T) {
 	it := freshInterp()
 	setZone1(it, gpoint{})
-	wantErr(t, it, cat(pw(9, 0), []byte{opSCFS}), "out of range")
+	wantHintErr(t, it, cat(pw(9, 0), []byte{opSCFS}), "out of range")
 }
 
 func TestGridRoundClampToZero(t *testing.T) {

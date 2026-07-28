@@ -34,6 +34,7 @@ type Font struct {
 	loca             []uint32
 	glyf             []byte
 	cmap             cmapLookup
+	cmapVS           *cmap14 // format-14 Unicode Variation Sequences subtable, if present
 
 	// TrueType instruction (hinting) tables and limits. These are optional:
 	// a font without them simply cannot be hinted. See hint.go.
@@ -149,4 +150,18 @@ func (f *Font) NumGlyphs() int { return f.numGlyphs }
 // ok is false when the rune has no glyph in that subtable.
 func (f *Font) GlyphIndex(r rune) (GlyphIndex, bool) {
 	return f.cmap.lookup(r)
+}
+
+// GlyphIndexVariation resolves a Unicode variation sequence (a base rune
+// followed by a variation selector) to a glyph index, using the font's
+// format-14 cmap subtable.
+//
+// ok is false when the font has no format-14 subtable, the variation
+// selector is not registered in it, or the sequence is registered as a
+// "default" mapping whose base rune has no glyph in the ordinary cmap.
+func (f *Font) GlyphIndexVariation(r, vs rune) (GlyphIndex, bool) {
+	if f.cmapVS == nil {
+		return 0, false
+	}
+	return f.cmapVS.lookupVariation(f, r, vs)
 }
