@@ -125,7 +125,6 @@ func gposFixture(t *testing.T) *gpos {
 	lookups := [][]byte{
 		buildLookup(2, [][]byte{pp1}),
 		buildLookup(2, [][]byte{pp2}),
-		buildLookup(1, [][]byte{{0, 0}}), // unsupported single-pos, parsed as no-op
 	}
 	scripts := []tScript{{tag: "DFLT", def: &tLangSys{required: 0xFFFF, features: []uint16{0}}}}
 	feats := []tFeature{{tag: "kern", lookups: []uint16{0, 1, 99}}}

@@ -4,22 +4,36 @@
 
 package opentype
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+)
 
-// This file decodes and applies the GPOS (Glyph Positioning) table, limited to
-// lookup type 2, pair adjustment (kerning), in both formats:
+// This file decodes and applies the GPOS (Glyph Positioning) table. It supports
+// the full set of positioning lookup types complex scripts rely on:
 //
-//   - Format 1: explicit (first, second) glyph pairs.
-//   - Format 2: pairs classified by a ClassDef on each side.
+//   - Type 1: single adjustment (formats 1 and 2).
+//   - Type 2: pair adjustment / kerning (formats 1 and 2).
+//   - Type 3: cursive attachment (entry/exit anchors).
+//   - Type 4: mark-to-base attachment (diacritics on a base glyph).
+//   - Type 5: mark-to-ligature attachment.
+//   - Type 6: mark-to-mark attachment (stacked diacritics).
+//   - Type 7: contextual positioning (formats 1 and 3).
+//   - Type 8: chaining contextual positioning (formats 1 and 3).
+//   - Type 9: extension positioning (indirection to another lookup type).
 //
-// Only the X advance of the first glyph's ValueRecord is extracted; the rest of
-// the ValueRecord (placement, Y advance, device offsets) is parsed and skipped.
-// This is what horizontal left-to-right kerning needs.
+// Anchor tables in formats 1, 2 and 3 are decoded; the anchor-point index of
+// format 2 and the Device/VariationIndex offsets of format 3 are tolerated and
+// ignored (their contribution is a hinting/variation refinement).
 //
-// Single positioning (type 1), cursive attachment (type 3), and the mark
-// positioning lookups (types 4 mark-to-base, 5 mark-to-ligature, 6 mark-to-mark)
-// as well as contextual/extension types (7, 8, 9) are intentionally NOT
-// implemented: subtables of an unsupported type are parsed as no-ops.
+// The class-based contextual sub-format (format 2 of types 7 and 8) is
+// deliberately deferred: such a subtable is parsed as a no-op and dropped. All
+// other sub-formats are implemented.
+//
+// Two entry points are exposed for the package's Face API to call: Kern (and
+// Kerner.Kerning) for horizontal pair kerning, and position, which applies the
+// full set of lookups over a glyph run and returns per-glyph placement and
+// advance adjustments.
 
 // gpos is a decoded GPOS table.
 type gpos struct {
@@ -27,37 +41,84 @@ type gpos struct {
 	lookups []gposLookup
 }
 
-// gposLookup is one decoded GPOS Lookup: its (supported) pair-adjustment
-// subtables.
+// gposLookup is one decoded GPOS Lookup: its supported positioning subtables.
 type gposLookup struct {
-	subtables []pairPos
+	subtables []posSubtable
 }
 
-// pairPos reports the first glyph's X-advance adjustment for a (left, right)
-// pair; ok is false when the subtable has no entry for the pair.
+// posSubtable applies a positioning adjustment at index i of a glyph run whose
+// current per-glyph adjustments live in the context. It reports whether it
+// applied, so lookup iteration knows to stop trying further subtables.
+type posSubtable interface {
+	apply(ctx *posContext, i int) bool
+}
+
+// pairPos is a positioning subtable that can also answer a standalone
+// (left, right) X-advance kern query; ok is false when it has no entry for the
+// pair. Only the pair-adjustment subtables (type 2) implement it.
 type pairPos interface {
+	posSubtable
 	kern(left, right GlyphIndex) (int, bool)
 }
 
-// valueRecordMask bits, from the GPOS ValueFormat definition.
-const valueXAdvance = 0x0004
+// GlyphPosition is the positioning adjustment GPOS computes for one glyph in a
+// run: pen placement offsets (XOffset, YOffset) and advance adjustments
+// (XAdvance, YAdvance), all in font units.
+type GlyphPosition struct {
+	XOffset  int
+	YOffset  int
+	XAdvance int
+	YAdvance int
+}
 
-// readValueXAdvance consumes a ValueRecord whose shape is given by format,
-// returning its X advance (0 when that field is absent). Each present field is
-// a 2-byte value; device fields are read and discarded like the rest.
-func readValueXAdvance(r *reader, format uint16) int {
-	x := 0
-	for bit := 0; bit < 8; bit++ {
-		mask := uint16(1) << uint(bit)
-		if format&mask == 0 {
-			continue
-		}
-		v := r.i16()
-		if mask == valueXAdvance {
-			x = int(v)
-		}
+// valueRecord holds the four positioning fields of a GPOS ValueRecord; Device
+// and VariationIndex offsets are consumed during parsing but not retained.
+type valueRecord struct {
+	xPlacement int
+	yPlacement int
+	xAdvance   int
+	yAdvance   int
+}
+
+// addValue accumulates a ValueRecord into a glyph's adjustment.
+func (p *GlyphPosition) addValue(v valueRecord) {
+	p.XOffset += v.xPlacement
+	p.YOffset += v.yPlacement
+	p.XAdvance += v.xAdvance
+	p.YAdvance += v.yAdvance
+}
+
+// readValueRecord consumes a ValueRecord whose shape is given by format,
+// returning its four positioning fields. Present fields are 2 bytes each and
+// appear in ValueFormat bit order; the four Device/VariationIndex offset fields
+// are read and discarded.
+func readValueRecord(r *reader, format uint16) valueRecord {
+	var v valueRecord
+	if format&0x0001 != 0 {
+		v.xPlacement = int(r.i16())
 	}
-	return x
+	if format&0x0002 != 0 {
+		v.yPlacement = int(r.i16())
+	}
+	if format&0x0004 != 0 {
+		v.xAdvance = int(r.i16())
+	}
+	if format&0x0008 != 0 {
+		v.yAdvance = int(r.i16())
+	}
+	if format&0x0010 != 0 {
+		r.u16() // X placement device
+	}
+	if format&0x0020 != 0 {
+		r.u16() // Y placement device
+	}
+	if format&0x0040 != 0 {
+		r.u16() // X advance device
+	}
+	if format&0x0080 != 0 {
+		r.u16() // Y advance device
+	}
+	return v
 }
 
 // parseGPOS decodes a GPOS table.
@@ -77,8 +138,7 @@ func parseGPOS(b []byte) (*gpos, error) {
 	return &gpos{layoutHeader: hdr, lookups: lookups}, nil
 }
 
-// parseGPOSLookup decodes one Lookup table, keeping only pair-adjustment
-// subtables (lookup type 2).
+// parseGPOSLookup decodes one Lookup table into its supported subtables.
 func parseGPOSLookup(b []byte) (gposLookup, error) {
 	r := reader{b: b}
 	lookupType := r.u16()
@@ -91,7 +151,7 @@ func parseGPOSLookup(b []byte) (gposLookup, error) {
 	if r.err != nil {
 		return gposLookup{}, fmt.Errorf("opentype: gpos lookup: %w", r.err)
 	}
-	var subs []pairPos
+	var subs []posSubtable
 	for _, off := range offs {
 		st, err := parseGPOSSubtable(lookupType, subslice(b, off))
 		if err != nil {
@@ -104,12 +164,215 @@ func parseGPOSLookup(b []byte) (gposLookup, error) {
 	return gposLookup{subtables: subs}, nil
 }
 
-// parseGPOSSubtable decodes one subtable of the given lookup type; unsupported
-// types yield a nil subtable the caller drops.
-func parseGPOSSubtable(lookupType uint16, b []byte) (pairPos, error) {
-	if lookupType != 2 {
-		return nil, nil // only pair adjustment is supported (documented)
+// parseGPOSSubtable decodes one subtable of the given lookup type. A deferred
+// sub-format yields a nil subtable the caller drops.
+func parseGPOSSubtable(lookupType uint16, b []byte) (posSubtable, error) {
+	switch lookupType {
+	case 1:
+		return parseSinglePos(b)
+	case 2:
+		return parsePairPosAny(b)
+	case 3:
+		return parseCursivePos(b)
+	case 4:
+		return parseMarkBasePos(b)
+	case 5:
+		return parseMarkLigPos(b)
+	case 6:
+		return parseMarkMarkPos(b)
+	case 7:
+		return parseContextPos(b)
+	case 8:
+		return parseChainPos(b)
+	case 9:
+		return parseExtensionPos(b)
+	default:
+		return nil, fmt.Errorf("opentype: gpos lookup type %d", lookupType)
 	}
+}
+
+// --- Anchor tables ----------------------------------------------------------
+
+// anchor is a decoded Anchor table's design-space coordinate.
+type anchor struct {
+	x int
+	y int
+}
+
+// parseAnchor decodes an Anchor table (format 1, 2 or 3). Format 2's anchor
+// point and format 3's Device/VariationIndex offsets are read and ignored.
+func parseAnchor(b []byte) (anchor, error) {
+	r := reader{b: b}
+	format := r.u16()
+	a := anchor{x: int(r.i16()), y: int(r.i16())}
+	switch format {
+	case 1:
+	case 2:
+		r.u16() // anchorPoint (ignored)
+	case 3:
+		r.u16() // xDeviceOffset (ignored)
+		r.u16() // yDeviceOffset (ignored)
+	default:
+		return anchor{}, fmt.Errorf("opentype: anchor format %d", format)
+	}
+	if r.err != nil {
+		return anchor{}, fmt.Errorf("opentype: anchor: %w", r.err)
+	}
+	return a, nil
+}
+
+// parseAnchorAt decodes the Anchor table at offset off from the start of b,
+// returning nil for a NULL (zero) offset.
+func parseAnchorAt(b []byte, off int) (*anchor, error) {
+	if off == 0 {
+		return nil, nil
+	}
+	a, err := parseAnchor(subslice(b, off))
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// parseAnchorMatrix decodes a rows*cols grid of Anchor offsets (a BaseArray,
+// Mark2Array or LigatureAttach body): a rowCount uint16 followed by
+// rowCount*cols anchor offsets relative to the start of b. NULL offsets yield a
+// nil anchor.
+func parseAnchorMatrix(b []byte, cols int) ([][]*anchor, error) {
+	r := reader{b: b}
+	rows := int(r.u16())
+	offs := make([][]int, rows)
+	for i := 0; i < rows; i++ {
+		offs[i] = make([]int, cols)
+		for j := 0; j < cols; j++ {
+			offs[i][j] = int(r.u16())
+		}
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: anchor matrix: %w", r.err)
+	}
+	out := make([][]*anchor, rows)
+	for i := 0; i < rows; i++ {
+		out[i] = make([]*anchor, cols)
+		for j := 0; j < cols; j++ {
+			a, err := parseAnchorAt(b, offs[i][j])
+			if err != nil {
+				return nil, err
+			}
+			out[i][j] = a
+		}
+	}
+	return out, nil
+}
+
+// markRecord binds a mark glyph's class to its attachment anchor.
+type markRecord struct {
+	class uint16
+	anch  anchor
+}
+
+// parseMarkArray decodes a MarkArray table (markCount records, each a class and
+// an Anchor offset).
+func parseMarkArray(b []byte) ([]markRecord, error) {
+	r := reader{b: b}
+	n := int(r.u16())
+	type mrec struct {
+		class uint16
+		off   int
+	}
+	recs := make([]mrec, n)
+	for i := 0; i < n; i++ {
+		recs[i].class = r.u16()
+		recs[i].off = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: markArray: %w", r.err)
+	}
+	out := make([]markRecord, n)
+	for i, rc := range recs {
+		a, err := parseAnchor(subslice(b, rc.off))
+		if err != nil {
+			return nil, err
+		}
+		out[i] = markRecord{class: rc.class, anch: a}
+	}
+	return out, nil
+}
+
+// --- Type 1: single adjustment ----------------------------------------------
+
+// singlePos1 applies one ValueRecord to every covered glyph.
+type singlePos1 struct {
+	cov map[GlyphIndex]int
+	val valueRecord
+}
+
+// singlePos2 applies a per-glyph ValueRecord indexed by coverage index.
+type singlePos2 struct {
+	cov  map[GlyphIndex]int
+	vals []valueRecord
+}
+
+// parseSinglePos decodes a SinglePos subtable (format 1 or 2).
+func parseSinglePos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	format := r.u16()
+	covOff := int(r.u16())
+	valueFormat := r.u16()
+	switch format {
+	case 1:
+		v := readValueRecord(&r, valueFormat)
+		if r.err != nil {
+			return nil, fmt.Errorf("opentype: singlepos1: %w", r.err)
+		}
+		cov, err := parseCoverage(subslice(b, covOff))
+		if err != nil {
+			return nil, err
+		}
+		return &singlePos1{cov: cov, val: v}, nil
+	case 2:
+		n := int(r.u16())
+		vals := make([]valueRecord, n)
+		for i := 0; i < n; i++ {
+			vals[i] = readValueRecord(&r, valueFormat)
+		}
+		if r.err != nil {
+			return nil, fmt.Errorf("opentype: singlepos2: %w", r.err)
+		}
+		cov, err := parseCoverage(subslice(b, covOff))
+		if err != nil {
+			return nil, err
+		}
+		return &singlePos2{cov: cov, vals: vals}, nil
+	default:
+		return nil, fmt.Errorf("opentype: singlepos format %d", format)
+	}
+}
+
+func (s *singlePos1) apply(ctx *posContext, i int) bool {
+	if _, ok := s.cov[ctx.glyphs[i]]; !ok {
+		return false
+	}
+	ctx.positions[i].addValue(s.val)
+	return true
+}
+
+func (s *singlePos2) apply(ctx *posContext, i int) bool {
+	ci, ok := s.cov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if ci >= len(s.vals) {
+		return false
+	}
+	ctx.positions[i].addValue(s.vals[ci])
+	return true
+}
+
+// --- Type 2: pair adjustment (kerning) --------------------------------------
+
+// parsePairPosAny decodes a PairPos subtable (format 1 or 2).
+func parsePairPosAny(b []byte) (posSubtable, error) {
 	r := reader{b: b}
 	format := r.u16()
 	switch format {
@@ -166,9 +429,9 @@ func parsePairSet(b []byte, vf1, vf2 uint16) (map[GlyphIndex]int, error) {
 	m := map[GlyphIndex]int{}
 	for i := 0; i < count; i++ {
 		second := GlyphIndex(r.u16())
-		x1 := readValueXAdvance(&r, vf1)
-		readValueXAdvance(&r, vf2) // value2 (applies to the right glyph) is skipped
-		m[second] = x1
+		v1 := readValueRecord(&r, vf1)
+		readValueRecord(&r, vf2) // value2 (applies to the right glyph) is skipped
+		m[second] = v1.xAdvance
 	}
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: pairSet: %w", r.err)
@@ -185,6 +448,18 @@ func (p *pairPos1) kern(left, right GlyphIndex) (int, bool) {
 		return v, true
 	}
 	return 0, false
+}
+
+func (p *pairPos1) apply(ctx *posContext, i int) bool {
+	if i+1 >= len(ctx.glyphs) {
+		return false
+	}
+	v, ok := p.kern(ctx.glyphs[i], ctx.glyphs[i+1])
+	if !ok {
+		return false
+	}
+	ctx.positions[i].XAdvance += v
+	return true
 }
 
 // pairPos2 is a pair-adjustment format 2 subtable: the first glyph must be
@@ -210,9 +485,9 @@ func parsePairPos2(b []byte) (pairPos, error) {
 	class2Count := int(r.u16())
 	grid := make([]int, class1Count*class2Count)
 	for i := range grid {
-		x1 := readValueXAdvance(&r, vf1)
-		readValueXAdvance(&r, vf2)
-		grid[i] = x1
+		v1 := readValueRecord(&r, vf1)
+		readValueRecord(&r, vf2)
+		grid[i] = v1.xAdvance
 	}
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: pairpos2: %w", r.err)
@@ -243,16 +518,929 @@ func (p *pairPos2) kern(left, right GlyphIndex) (int, bool) {
 	return p.grid[idx], true
 }
 
+func (p *pairPos2) apply(ctx *posContext, i int) bool {
+	if i+1 >= len(ctx.glyphs) {
+		return false
+	}
+	v, ok := p.kern(ctx.glyphs[i], ctx.glyphs[i+1])
+	if !ok {
+		return false
+	}
+	ctx.positions[i].XAdvance += v
+	return true
+}
+
+// --- Type 3: cursive attachment ---------------------------------------------
+
+// cursivePos joins covered glyphs by aligning one glyph's exit anchor to the
+// next glyph's entry anchor. entry[i] and exit[i] are indexed by coverage index
+// and may be nil (NULL anchor).
+type cursivePos struct {
+	cov   map[GlyphIndex]int
+	entry []*anchor
+	exit  []*anchor
+}
+
+// parseCursivePos decodes a CursivePos format 1 subtable.
+func parseCursivePos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	covOff := int(r.u16())
+	n := int(r.u16())
+	entryOffs := make([]int, n)
+	exitOffs := make([]int, n)
+	for i := 0; i < n; i++ {
+		entryOffs[i] = int(r.u16())
+		exitOffs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cursivepos: %w", r.err)
+	}
+	cov, err := parseCoverage(subslice(b, covOff))
+	if err != nil {
+		return nil, err
+	}
+	entry := make([]*anchor, n)
+	exit := make([]*anchor, n)
+	for i := 0; i < n; i++ {
+		if entry[i], err = parseAnchorAt(b, entryOffs[i]); err != nil {
+			return nil, err
+		}
+		if exit[i], err = parseAnchorAt(b, exitOffs[i]); err != nil {
+			return nil, err
+		}
+	}
+	return &cursivePos{cov: cov, entry: entry, exit: exit}, nil
+}
+
+func (c *cursivePos) apply(ctx *posContext, i int) bool {
+	ci, ok := c.cov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if i+1 >= len(ctx.glyphs) {
+		return false
+	}
+	ni, ok := c.cov[ctx.glyphs[i+1]]
+	if !ok {
+		return false
+	}
+	if ci >= len(c.exit) || ni >= len(c.entry) {
+		return false
+	}
+	ex, en := c.exit[ci], c.entry[ni]
+	if ex == nil || en == nil {
+		return false
+	}
+	// Place the entry anchor of the following glyph onto the exit anchor of the
+	// current glyph, forming a cursive join.
+	ctx.positions[i+1].XOffset += ex.x - en.x
+	ctx.positions[i+1].YOffset += ex.y - en.y
+	return true
+}
+
+// --- Types 4/5/6: mark attachment -------------------------------------------
+
+// attachMark positions a mark glyph so its anchor coincides with the base's
+// anchor, discounting the advances between the base and the mark so the mark
+// (whose pen sits after the base) is pulled back onto it.
+func (ctx *posContext) attachMark(base, mark int, baseAnchor, markAnchor anchor) {
+	dx := baseAnchor.x - markAnchor.x
+	dy := baseAnchor.y - markAnchor.y
+	for k := base; k < mark; k++ {
+		dx -= ctx.advance(k)
+	}
+	ctx.positions[mark].XOffset = ctx.positions[base].XOffset + dx
+	ctx.positions[mark].YOffset = ctx.positions[base].YOffset + dy
+	ctx.positions[mark].XAdvance = 0
+	ctx.positions[mark].YAdvance = 0
+}
+
+// markBasePos is a mark-to-base (type 4) subtable: base[baseIndex][markClass]
+// gives the base attachment anchor for each mark class.
+type markBasePos struct {
+	markCov map[GlyphIndex]int
+	baseCov map[GlyphIndex]int
+	marks   []markRecord
+	base    [][]*anchor
+}
+
+// parseMarkBasePos decodes a MarkBasePos format 1 subtable.
+func parseMarkBasePos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	markCovOff := int(r.u16())
+	baseCovOff := int(r.u16())
+	classCount := int(r.u16())
+	markArrOff := int(r.u16())
+	baseArrOff := int(r.u16())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: markbasepos: %w", r.err)
+	}
+	markCov, err := parseCoverage(subslice(b, markCovOff))
+	if err != nil {
+		return nil, err
+	}
+	baseCov, err := parseCoverage(subslice(b, baseCovOff))
+	if err != nil {
+		return nil, err
+	}
+	marks, err := parseMarkArray(subslice(b, markArrOff))
+	if err != nil {
+		return nil, err
+	}
+	base, err := parseAnchorMatrix(subslice(b, baseArrOff), classCount)
+	if err != nil {
+		return nil, err
+	}
+	return &markBasePos{markCov: markCov, baseCov: baseCov, marks: marks, base: base}, nil
+}
+
+func (m *markBasePos) apply(ctx *posContext, i int) bool {
+	mi, ok := m.markCov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if mi >= len(m.marks) {
+		return false
+	}
+	mr := m.marks[mi]
+	for b := i - 1; b >= 0; b-- {
+		bi, ok := m.baseCov[ctx.glyphs[b]]
+		if !ok {
+			continue
+		}
+		if bi >= len(m.base) || int(mr.class) >= len(m.base[bi]) {
+			return false
+		}
+		ba := m.base[bi][mr.class]
+		if ba == nil {
+			return false
+		}
+		ctx.attachMark(b, i, *ba, mr.anch)
+		return true
+	}
+	return false
+}
+
+// markLigPos is a mark-to-ligature (type 5) subtable: ligs[ligIndex][component]
+// [markClass] gives the attachment anchor. Component selection (which needs the
+// GSUB ligature-component tracking the caller does not provide) is simplified
+// to the first component.
+type markLigPos struct {
+	markCov map[GlyphIndex]int
+	ligCov  map[GlyphIndex]int
+	marks   []markRecord
+	ligs    [][][]*anchor
+}
+
+// parseMarkLigPos decodes a MarkLigPos format 1 subtable.
+func parseMarkLigPos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	markCovOff := int(r.u16())
+	ligCovOff := int(r.u16())
+	classCount := int(r.u16())
+	markArrOff := int(r.u16())
+	ligArrOff := int(r.u16())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: markligpos: %w", r.err)
+	}
+	markCov, err := parseCoverage(subslice(b, markCovOff))
+	if err != nil {
+		return nil, err
+	}
+	ligCov, err := parseCoverage(subslice(b, ligCovOff))
+	if err != nil {
+		return nil, err
+	}
+	marks, err := parseMarkArray(subslice(b, markArrOff))
+	if err != nil {
+		return nil, err
+	}
+	ligs, err := parseLigatureArray(subslice(b, ligArrOff), classCount)
+	if err != nil {
+		return nil, err
+	}
+	return &markLigPos{markCov: markCov, ligCov: ligCov, marks: marks, ligs: ligs}, nil
+}
+
+// parseLigatureArray decodes a LigatureArray table: a ligatureCount uint16 then
+// that many LigatureAttach offsets, each an anchor matrix of componentCount
+// rows and cols (markClassCount) columns.
+func parseLigatureArray(b []byte, cols int) ([][][]*anchor, error) {
+	r := reader{b: b}
+	n := int(r.u16())
+	offs := make([]int, n)
+	for i := 0; i < n; i++ {
+		offs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: ligatureArray: %w", r.err)
+	}
+	out := make([][][]*anchor, n)
+	for i, off := range offs {
+		la, err := parseAnchorMatrix(subslice(b, off), cols)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = la
+	}
+	return out, nil
+}
+
+func (m *markLigPos) apply(ctx *posContext, i int) bool {
+	mi, ok := m.markCov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if mi >= len(m.marks) {
+		return false
+	}
+	mr := m.marks[mi]
+	for b := i - 1; b >= 0; b-- {
+		li, ok := m.ligCov[ctx.glyphs[b]]
+		if !ok {
+			continue
+		}
+		if li >= len(m.ligs) || len(m.ligs[li]) == 0 {
+			return false
+		}
+		comp := m.ligs[li][0] // first component (documented simplification)
+		if int(mr.class) >= len(comp) {
+			return false
+		}
+		la := comp[mr.class]
+		if la == nil {
+			return false
+		}
+		ctx.attachMark(b, i, *la, mr.anch)
+		return true
+	}
+	return false
+}
+
+// markMarkPos is a mark-to-mark (type 6) subtable: mark2[mark2Index][markClass]
+// gives the base-mark attachment anchor.
+type markMarkPos struct {
+	mark1Cov map[GlyphIndex]int
+	mark2Cov map[GlyphIndex]int
+	marks    []markRecord
+	mark2    [][]*anchor
+}
+
+// parseMarkMarkPos decodes a MarkMarkPos format 1 subtable.
+func parseMarkMarkPos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	mark1CovOff := int(r.u16())
+	mark2CovOff := int(r.u16())
+	classCount := int(r.u16())
+	mark1ArrOff := int(r.u16())
+	mark2ArrOff := int(r.u16())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: markmarkpos: %w", r.err)
+	}
+	mark1Cov, err := parseCoverage(subslice(b, mark1CovOff))
+	if err != nil {
+		return nil, err
+	}
+	mark2Cov, err := parseCoverage(subslice(b, mark2CovOff))
+	if err != nil {
+		return nil, err
+	}
+	marks, err := parseMarkArray(subslice(b, mark1ArrOff))
+	if err != nil {
+		return nil, err
+	}
+	mark2, err := parseAnchorMatrix(subslice(b, mark2ArrOff), classCount)
+	if err != nil {
+		return nil, err
+	}
+	return &markMarkPos{mark1Cov: mark1Cov, mark2Cov: mark2Cov, marks: marks, mark2: mark2}, nil
+}
+
+func (m *markMarkPos) apply(ctx *posContext, i int) bool {
+	mi, ok := m.mark1Cov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if mi >= len(m.marks) {
+		return false
+	}
+	mr := m.marks[mi]
+	for b := i - 1; b >= 0; b-- {
+		bi, ok := m.mark2Cov[ctx.glyphs[b]]
+		if !ok {
+			continue
+		}
+		if bi >= len(m.mark2) || int(mr.class) >= len(m.mark2[bi]) {
+			return false
+		}
+		ba := m.mark2[bi][mr.class]
+		if ba == nil {
+			return false
+		}
+		ctx.attachMark(b, i, *ba, mr.anch)
+		return true
+	}
+	return false
+}
+
+// --- Types 7/8: contextual and chaining positioning -------------------------
+
+// posLookupRecord applies the lookup at lookupIndex to the input glyph at
+// seqIndex within a matched context.
+type posLookupRecord struct {
+	seqIndex    uint16
+	lookupIndex uint16
+}
+
+// readPosLookupRecords reads n PosLookupRecords.
+func readPosLookupRecords(r *reader, n int) []posLookupRecord {
+	recs := make([]posLookupRecord, n)
+	for i := range recs {
+		recs[i].seqIndex = r.u16()
+		recs[i].lookupIndex = r.u16()
+	}
+	return recs
+}
+
+// matchGlyphs reports whether glyphs[start+k] == seq[k] for all k (bounds
+// checked).
+func matchGlyphs(glyphs []GlyphIndex, start int, seq []GlyphIndex) bool {
+	if start < 0 || start+len(seq) > len(glyphs) {
+		return false
+	}
+	for k, g := range seq {
+		if glyphs[start+k] != g {
+			return false
+		}
+	}
+	return true
+}
+
+// matchBacktrack reports whether the backtrack sequence matches the glyphs
+// preceding index i (back[k] against glyphs[i-1-k]).
+func matchBacktrack(glyphs []GlyphIndex, i int, back []GlyphIndex) bool {
+	for k, g := range back {
+		j := i - 1 - k
+		if j < 0 || glyphs[j] != g {
+			return false
+		}
+	}
+	return true
+}
+
+// posRule is one contextual (type 7 format 1) rule: an input sequence (from the
+// second glyph) and the lookup records to run when it matches.
+type posRule struct {
+	input []GlyphIndex
+	recs  []posLookupRecord
+}
+
+// contextPos1 is a contextual positioning format 1 subtable.
+type contextPos1 struct {
+	cov  map[GlyphIndex]int
+	sets [][]posRule
+}
+
+// contextPos3 is a contextual positioning format 3 subtable: a per-position
+// coverage sequence and the lookup records to run on a full match.
+type contextPos3 struct {
+	covs []map[GlyphIndex]int
+	recs []posLookupRecord
+}
+
+// parseContextPos decodes a contextual positioning subtable. Format 2 (class
+// based) is deferred and yields a nil subtable.
+func parseContextPos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	format := r.u16()
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: contextpos: %w", r.err)
+	}
+	switch format {
+	case 1:
+		return parseContextPos1(b)
+	case 3:
+		return parseContextPos3(b)
+	case 2:
+		return nil, nil // class-based contextual positioning deferred (documented)
+	default:
+		return nil, fmt.Errorf("opentype: contextpos format %d", format)
+	}
+}
+
+// parseContextPos1 decodes a contextual positioning format 1 subtable.
+func parseContextPos1(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	covOff := int(r.u16())
+	n := int(r.u16())
+	setOffs := make([]int, n)
+	for i := 0; i < n; i++ {
+		setOffs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: contextpos1: %w", r.err)
+	}
+	cov, err := parseCoverage(subslice(b, covOff))
+	if err != nil {
+		return nil, err
+	}
+	sets := make([][]posRule, n)
+	for i, so := range setOffs {
+		rs, err := parsePosRuleSet(subslice(b, so))
+		if err != nil {
+			return nil, err
+		}
+		sets[i] = rs
+	}
+	return &contextPos1{cov: cov, sets: sets}, nil
+}
+
+// parsePosRuleSet decodes a PosRuleSet table (a list of PosRule offsets).
+func parsePosRuleSet(b []byte) ([]posRule, error) {
+	r := reader{b: b}
+	n := int(r.u16())
+	offs := make([]int, n)
+	for i := 0; i < n; i++ {
+		offs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: posRuleSet: %w", r.err)
+	}
+	rules := make([]posRule, n)
+	for i, off := range offs {
+		rule, err := parsePosRule(subslice(b, off))
+		if err != nil {
+			return nil, err
+		}
+		rules[i] = rule
+	}
+	return rules, nil
+}
+
+// parsePosRule decodes one PosRule table.
+func parsePosRule(b []byte) (posRule, error) {
+	r := reader{b: b}
+	glyphCount := int(r.u16())
+	lookupCount := int(r.u16())
+	input := make([]GlyphIndex, 0, glyphCount)
+	for k := 1; k < glyphCount; k++ {
+		input = append(input, GlyphIndex(r.u16()))
+	}
+	recs := readPosLookupRecords(&r, lookupCount)
+	if r.err != nil {
+		return posRule{}, fmt.Errorf("opentype: posRule: %w", r.err)
+	}
+	return posRule{input: input, recs: recs}, nil
+}
+
+func (c *contextPos1) apply(ctx *posContext, i int) bool {
+	ci, ok := c.cov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if ci >= len(c.sets) {
+		return false
+	}
+	for _, rule := range c.sets[ci] {
+		if matchGlyphs(ctx.glyphs, i+1, rule.input) {
+			ctx.applyRecords(rule.recs, i)
+			return true
+		}
+	}
+	return false
+}
+
+// parseContextPos3 decodes a contextual positioning format 3 subtable.
+func parseContextPos3(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	glyphCount := int(r.u16())
+	lookupCount := int(r.u16())
+	covOffs := make([]int, glyphCount)
+	for i := 0; i < glyphCount; i++ {
+		covOffs[i] = int(r.u16())
+	}
+	recs := readPosLookupRecords(&r, lookupCount)
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: contextpos3: %w", r.err)
+	}
+	covs, err := parsePosCoverageList(b, covOffs)
+	if err != nil {
+		return nil, err
+	}
+	return &contextPos3{covs: covs, recs: recs}, nil
+}
+
+func (c *contextPos3) apply(ctx *posContext, i int) bool {
+	for k, cov := range c.covs {
+		j := i + k
+		if j >= len(ctx.glyphs) {
+			return false
+		}
+		if _, ok := cov[ctx.glyphs[j]]; !ok {
+			return false
+		}
+	}
+	ctx.applyRecords(c.recs, i)
+	return true
+}
+
+// parsePosCoverageList decodes a slice of Coverage tables at the given offsets from
+// the start of b.
+func parsePosCoverageList(b []byte, offs []int) ([]map[GlyphIndex]int, error) {
+	covs := make([]map[GlyphIndex]int, len(offs))
+	for i, off := range offs {
+		cov, err := parseCoverage(subslice(b, off))
+		if err != nil {
+			return nil, err
+		}
+		covs[i] = cov
+	}
+	return covs, nil
+}
+
+// posChainRule is one chaining contextual (type 8 format 1) rule.
+type posChainRule struct {
+	back  []GlyphIndex
+	input []GlyphIndex
+	ahead []GlyphIndex
+	recs  []posLookupRecord
+}
+
+// chainPos1 is a chaining contextual positioning format 1 subtable.
+type chainPos1 struct {
+	cov  map[GlyphIndex]int
+	sets [][]posChainRule
+}
+
+// chainPos3 is a chaining contextual positioning format 3 subtable.
+type chainPos3 struct {
+	back  []map[GlyphIndex]int
+	input []map[GlyphIndex]int
+	ahead []map[GlyphIndex]int
+	recs  []posLookupRecord
+}
+
+// parseChainPos decodes a chaining contextual positioning subtable. Format 2
+// (class based) is deferred and yields a nil subtable.
+func parseChainPos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	format := r.u16()
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: chainpos: %w", r.err)
+	}
+	switch format {
+	case 1:
+		return parseChainPos1(b)
+	case 3:
+		return parseChainPos3(b)
+	case 2:
+		return nil, nil // class-based chaining positioning deferred (documented)
+	default:
+		return nil, fmt.Errorf("opentype: chainpos format %d", format)
+	}
+}
+
+// parseChainPos1 decodes a chaining contextual positioning format 1 subtable.
+func parseChainPos1(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	covOff := int(r.u16())
+	n := int(r.u16())
+	setOffs := make([]int, n)
+	for i := 0; i < n; i++ {
+		setOffs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: chainpos1: %w", r.err)
+	}
+	cov, err := parseCoverage(subslice(b, covOff))
+	if err != nil {
+		return nil, err
+	}
+	sets := make([][]posChainRule, n)
+	for i, so := range setOffs {
+		rs, err := parsePosChainRuleSet(subslice(b, so))
+		if err != nil {
+			return nil, err
+		}
+		sets[i] = rs
+	}
+	return &chainPos1{cov: cov, sets: sets}, nil
+}
+
+// parsePosChainRuleSet decodes a ChainPosRuleSet table.
+func parsePosChainRuleSet(b []byte) ([]posChainRule, error) {
+	r := reader{b: b}
+	n := int(r.u16())
+	offs := make([]int, n)
+	for i := 0; i < n; i++ {
+		offs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: chainRuleSet: %w", r.err)
+	}
+	rules := make([]posChainRule, n)
+	for i, off := range offs {
+		rule, err := parsePosChainRule(subslice(b, off))
+		if err != nil {
+			return nil, err
+		}
+		rules[i] = rule
+	}
+	return rules, nil
+}
+
+// parsePosChainRule decodes one ChainPosRule table.
+func parsePosChainRule(b []byte) (posChainRule, error) {
+	r := reader{b: b}
+	bn := int(r.u16())
+	back := make([]GlyphIndex, bn)
+	for k := 0; k < bn; k++ {
+		back[k] = GlyphIndex(r.u16())
+	}
+	in := int(r.u16())
+	input := make([]GlyphIndex, 0, in)
+	for k := 1; k < in; k++ {
+		input = append(input, GlyphIndex(r.u16()))
+	}
+	an := int(r.u16())
+	ahead := make([]GlyphIndex, an)
+	for k := 0; k < an; k++ {
+		ahead[k] = GlyphIndex(r.u16())
+	}
+	ln := int(r.u16())
+	recs := readPosLookupRecords(&r, ln)
+	if r.err != nil {
+		return posChainRule{}, fmt.Errorf("opentype: posChainRule: %w", r.err)
+	}
+	return posChainRule{back: back, input: input, ahead: ahead, recs: recs}, nil
+}
+
+func (c *chainPos1) apply(ctx *posContext, i int) bool {
+	ci, ok := c.cov[ctx.glyphs[i]]
+	if !ok {
+		return false
+	}
+	if ci >= len(c.sets) {
+		return false
+	}
+	for _, rule := range c.sets[ci] {
+		if matchBacktrack(ctx.glyphs, i, rule.back) &&
+			matchGlyphs(ctx.glyphs, i+1, rule.input) &&
+			matchGlyphs(ctx.glyphs, i+1+len(rule.input), rule.ahead) {
+			ctx.applyRecords(rule.recs, i)
+			return true
+		}
+	}
+	return false
+}
+
+// parseChainPos3 decodes a chaining contextual positioning format 3 subtable.
+func parseChainPos3(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	bn := int(r.u16())
+	backOffs := readOffsets(&r, bn)
+	in := int(r.u16())
+	inputOffs := readOffsets(&r, in)
+	an := int(r.u16())
+	aheadOffs := readOffsets(&r, an)
+	ln := int(r.u16())
+	recs := readPosLookupRecords(&r, ln)
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: chainpos3: %w", r.err)
+	}
+	back, err := parsePosCoverageList(b, backOffs)
+	if err != nil {
+		return nil, err
+	}
+	input, err := parsePosCoverageList(b, inputOffs)
+	if err != nil {
+		return nil, err
+	}
+	ahead, err := parsePosCoverageList(b, aheadOffs)
+	if err != nil {
+		return nil, err
+	}
+	return &chainPos3{back: back, input: input, ahead: ahead, recs: recs}, nil
+}
+
+// readOffsets reads n uint16 offsets.
+func readOffsets(r *reader, n int) []int {
+	offs := make([]int, n)
+	for i := range offs {
+		offs[i] = int(r.u16())
+	}
+	return offs
+}
+
+func (c *chainPos3) apply(ctx *posContext, i int) bool {
+	for k, cov := range c.back {
+		j := i - 1 - k
+		if j < 0 {
+			return false
+		}
+		if _, ok := cov[ctx.glyphs[j]]; !ok {
+			return false
+		}
+	}
+	for k, cov := range c.input {
+		j := i + k
+		if j >= len(ctx.glyphs) {
+			return false
+		}
+		if _, ok := cov[ctx.glyphs[j]]; !ok {
+			return false
+		}
+	}
+	base := i + len(c.input)
+	for k, cov := range c.ahead {
+		j := base + k
+		if j >= len(ctx.glyphs) {
+			return false
+		}
+		if _, ok := cov[ctx.glyphs[j]]; !ok {
+			return false
+		}
+	}
+	ctx.applyRecords(c.recs, i)
+	return true
+}
+
+// --- Type 9: extension positioning ------------------------------------------
+
+// parseExtensionPos decodes an ExtensionPos format 1 subtable, following the
+// indirection to the real subtable of extensionLookupType.
+func parseExtensionPos(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat (1)
+	extType := r.u16()
+	off := int(r.u32())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: extensionpos: %w", r.err)
+	}
+	if extType == 9 {
+		return nil, fmt.Errorf("opentype: nested extension positioning")
+	}
+	return parseGPOSSubtable(extType, subslice(b, off))
+}
+
+// --- Application over a glyph run -------------------------------------------
+
+// posContext carries the run being positioned and the accumulating adjustments
+// while a lookup (and any lookups it nests) is applied.
+type posContext struct {
+	g         *gpos
+	glyphs    []GlyphIndex
+	positions []GlyphPosition
+	advances  []int
+}
+
+// advance returns the effective X advance of glyph k (its base advance, when
+// supplied, plus any adjustment applied so far).
+func (ctx *posContext) advance(k int) int {
+	a := ctx.positions[k].XAdvance
+	if k < len(ctx.advances) {
+		a += ctx.advances[k]
+	}
+	return a
+}
+
+// applyRecords runs a context's PosLookupRecords, each nesting a lookup at the
+// input position given by its sequence index relative to at.
+func (ctx *posContext) applyRecords(recs []posLookupRecord, at int) {
+	for _, rec := range recs {
+		ctx.g.applyLookupAt(int(rec.lookupIndex), ctx, at+int(rec.seqIndex))
+	}
+}
+
+// applyLookup applies one lookup left-to-right across the whole run, taking the
+// first subtable that matches at each position.
+func (p *gpos) applyLookup(li int, ctx *posContext) {
+	if li < 0 || li >= len(p.lookups) {
+		return
+	}
+	lk := p.lookups[li]
+	for i := 0; i < len(ctx.glyphs); i++ {
+		for _, st := range lk.subtables {
+			if st.apply(ctx, i) {
+				break
+			}
+		}
+	}
+}
+
+// applyLookupAt applies one lookup at a single run position, taking the first
+// matching subtable; it reports whether any subtable matched.
+func (p *gpos) applyLookupAt(li int, ctx *posContext, i int) bool {
+	if li < 0 || li >= len(p.lookups) {
+		return false
+	}
+	if i < 0 || i >= len(ctx.glyphs) {
+		return false
+	}
+	for _, st := range p.lookups[li].subtables {
+		if st.apply(ctx, i) {
+			return true
+		}
+	}
+	return false
+}
+
+// position applies the GPOS lookups activated by the given feature tags over a
+// glyph run and returns one adjustment per glyph. advances gives each glyph's
+// base horizontal advance in font units (used to pull marks back onto their
+// base); it may be nil, treated as all-zero. The returned slice has the same
+// length as glyphs; an empty run or no matching lookups yields all-zero
+// adjustments.
+func (p *gpos) position(glyphs []GlyphIndex, advances []int, features ...string) []GlyphPosition {
+	positions := make([]GlyphPosition, len(glyphs))
+	if len(glyphs) == 0 {
+		return positions
+	}
+	want := make(map[string]bool, len(features))
+	for _, f := range features {
+		want[f] = true
+	}
+	ctx := &posContext{g: p, glyphs: glyphs, positions: positions, advances: advances}
+	for _, li := range p.selectLookupsDefault(want) {
+		p.applyLookup(li, ctx)
+	}
+	return positions
+}
+
+// --- Feature/script selection ------------------------------------------------
+
+// featureLookups accumulates, into out (de-duplicated via seen), the lookup
+// indices activated by the wanted feature tags of one LangSys, including its
+// required feature.
+func (h *layoutHeader) featureLookups(ls *langSys, want map[string]bool, seen map[int]bool, out *[]int) {
+	add := func(featIdx uint16) {
+		if int(featIdx) >= len(h.features) {
+			return
+		}
+		fr := h.features[featIdx]
+		if !want[fr.tag] {
+			return
+		}
+		for _, li := range fr.lookups {
+			if !seen[int(li)] {
+				seen[int(li)] = true
+				*out = append(*out, int(li))
+			}
+		}
+	}
+	if ls.required != 0xFFFF {
+		add(ls.required)
+	}
+	for _, fi := range ls.features {
+		add(fi)
+	}
+}
+
+// selectLookupsDefault resolves the lookups for the wanted features using the
+// default (script-agnostic) resolution real text runs use: it first tries the
+// DFLT script's default LangSys, then falls back to unioning the wanted
+// features across every script's default LangSys. The fallback is what makes a
+// font that registers "kern"/"mark"/"mkmk" only under a real script (such as
+// latn on Source Serif, or arab) resolve when a bare DFLT lookup was empty.
+func (h *layoutHeader) selectLookupsDefault(want map[string]bool) []int {
+	if out := h.selectLookups("DFLT", "", want); len(out) > 0 {
+		return out
+	}
+	seen := map[int]bool{}
+	var out []int
+	for i := range h.scripts {
+		if ls := h.scripts[i].defaultLang; ls != nil {
+			h.featureLookups(ls, want, seen, &out)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
 // Kern returns the X-advance adjustment GPOS applies between left and right via
-// the "kern" feature, or 0 when no pair-adjustment lookup covers the pair.
+// the "kern" feature, or 0 when no pair-adjustment lookup covers the pair. The
+// kern feature is resolved with the default script-agnostic fallback, so fonts
+// that file kerning under a real script (not DFLT) still resolve.
 func (p *gpos) Kern(left, right GlyphIndex) int {
-	idxs := p.selectLookups("DFLT", "", map[string]bool{"kern": true})
+	idxs := p.selectLookupsDefault(map[string]bool{"kern": true})
 	for _, li := range idxs {
 		if li >= len(p.lookups) {
 			continue
 		}
 		for _, st := range p.lookups[li].subtables {
-			if v, ok := st.kern(left, right); ok {
+			pp, ok := st.(pairPos)
+			if !ok {
+				continue
+			}
+			if v, ok := pp.kern(left, right); ok {
 				return v
 			}
 		}
