@@ -52,10 +52,16 @@ type gsubLookup struct {
 
 // gsubApplier carries the state threaded through a GSUB pass: the full lookup
 // list (so contextual lookups can recurse into nested lookups) and the current
-// recursion depth.
+// recursion depth. clusters, when non-nil, is a parallel per-glyph slice kept
+// in lock-step with the run as it is rewritten: the length-changing subtables
+// (multiple and ligature substitution) splice it exactly as they splice the
+// glyphs, so each output glyph records the input position it derives from. It
+// is nil for plain (untracked) application, which leaves those subtables' fast
+// path unchanged.
 type gsubApplier struct {
-	lookups []gsubLookup
-	depth   int
+	lookups  []gsubLookup
+	depth    int
+	clusters []int
 }
 
 // gsubSubtable attempts a substitution at position i of a glyph run. On success
@@ -309,7 +315,7 @@ func parseGSUBMultiple(b []byte) (gsubSubtable, error) {
 	return &gsubMultiple1{cov: cov, seqs: seqs}, nil
 }
 
-func (s *gsubMultiple1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
+func (s *gsubMultiple1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
 	idx, ok := s.cov[g[i]]
 	if !ok {
 		return g, i, false
@@ -319,6 +325,7 @@ func (s *gsubMultiple1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex
 	out = append(out, g[:i]...)
 	out = append(out, seq...)
 	out = append(out, g[i+1:]...)
+	a.spliceClusters(i, 1, len(seq))
 	return out, i + len(seq), true
 }
 
@@ -455,7 +462,7 @@ func parseLigature(b []byte) (ligature, error) {
 	return ligature{glyph: glyph, rest: rest}, nil
 }
 
-func (s *gsubLigature1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
+func (s *gsubLigature1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
 	ci, ok := s.cov[g[i]]
 	if !ok {
 		return g, i, false
@@ -479,9 +486,31 @@ func (s *gsubLigature1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex
 		out = append(out, g[:i]...)
 		out = append(out, lig.glyph)
 		out = append(out, g[i+1+n:]...)
+		a.spliceClusters(i, 1+n, 1)
 		return out, i + 1, true
 	}
 	return g, i, false
+}
+
+// spliceClusters mirrors, on the tracked cluster slice, a substitution that
+// replaced `consumed` input glyphs at position i with `produced` output glyphs.
+// The produced glyphs all inherit the cluster of the first consumed glyph, so a
+// decomposition's parts share their source position and a ligature's result
+// keeps its first component's. It is a no-op when tracking is off (clusters
+// nil), which is the case for plain Apply/ApplyMasked.
+func (a *gsubApplier) spliceClusters(i, consumed, produced int) {
+	if a.clusters == nil {
+		return
+	}
+	c := a.clusters
+	src := c[i]
+	nc := make([]int, 0, len(c)-consumed+produced)
+	nc = append(nc, c[:i]...)
+	for k := 0; k < produced; k++ {
+		nc = append(nc, src)
+	}
+	nc = append(nc, c[i+consumed:]...)
+	a.clusters = nc
 }
 
 // --- Sequence-matching helpers (shared by types 5, 6 and 8) -----------------
