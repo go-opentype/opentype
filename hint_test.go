@@ -69,7 +69,7 @@ const (
 	opSLOOP    = 0x17
 	opRTG      = 0x18
 	opRTHG     = 0x19
-	opRTDG     = 0x3A
+	opRTDG     = 0x3D
 	opRUTG     = 0x7C
 	opRDTG     = 0x7D
 	opROFF     = 0x7A
@@ -392,9 +392,9 @@ func TestCallDepth(t *testing.T) {
 
 func TestIDEF(t *testing.T) {
 	it := freshInterp()
-	// Define instruction 0x92 (unused) to push 99, then invoke it as a raw op.
-	def := cat(pb(0x92), []byte{opIDEF}, pb(99), []byte{opENDF})
-	wantStack(t, runOps(t, it, cat(def, []byte{0x92})), 99)
+	// Define reserved instruction 0x8F to push 99, then invoke it as a raw op.
+	def := cat(pb(0x8F), []byte{opIDEF}, pb(99), []byte{opENDF})
+	wantStack(t, runOps(t, it, cat(def, []byte{0x8F})), 99)
 	// IDEF errors.
 	wantHintErr(t, it, []byte{opIDEF}, "underflow")
 	wantHintErr(t, it, cat(pb(0x93), []byte{opIDEF}, pb(1)), "truncated")
@@ -402,8 +402,8 @@ func TestIDEF(t *testing.T) {
 
 func TestUnimplementedOpcode(t *testing.T) {
 	it := freshInterp()
-	// 0x56 (ODD) is deliberately not implemented and has no IDEF.
-	wantHintErr(t, it, []byte{0x56}, "unimplemented opcode 0x56")
+	// 0x28 is a reserved/undefined opcode with no IDEF: it reaches the fallback.
+	wantHintErr(t, it, []byte{0x28}, "unimplemented opcode 0x28")
 }
 
 // --- storage ----------------------------------------------------------------
@@ -991,12 +991,12 @@ func TestNewInterpErrors(t *testing.T) {
 		t.Fatalf("newInterp(ppem=0) err=%v", err)
 	}
 	// fpgm error: an unimplemented opcode aborts newInterp.
-	ff, _ := Parse(hintFontBytes([]byte{0x56}, nil, nil))
+	ff, _ := Parse(hintFontBytes([]byte{0x28}, nil, nil))
 	if _, err := newInterp(ff, 16); err == nil || !strings.Contains(err.Error(), "unimplemented") {
 		t.Fatalf("newInterp fpgm err=%v", err)
 	}
 	// prep error.
-	pf, _ := Parse(hintFontBytes(nil, []byte{0x56}, nil))
+	pf, _ := Parse(hintFontBytes(nil, []byte{0x28}, nil))
 	if _, err := newInterp(pf, 16); err == nil || !strings.Contains(err.Error(), "unimplemented") {
 		t.Fatalf("newInterp prep err=%v", err)
 	}
@@ -1008,7 +1008,7 @@ func TestRunError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newInterp: %v", err)
 	}
-	if _, err := it.run([]outlinePoint{{}}, []byte{0x56}); err == nil {
+	if _, err := it.run([]outlinePoint{{}}, []byte{0x28}); err == nil {
 		t.Fatalf("run should surface the unimplemented-opcode error")
 	}
 }
@@ -1123,4 +1123,341 @@ func TestSmallMaxStackFloor(t *testing.T) {
 	if it.maxStack != 32 {
 		t.Errorf("maxStack=%d want floored to 32", it.maxStack)
 	}
+}
+
+// === newly-implemented opcodes ==============================================
+
+func TestGetVectors(t *testing.T) {
+	it := freshInterp()
+	// Default projection/freedom vectors are the x-axis -> (16384, 0) in F2Dot14.
+	wantStack(t, runOps(t, it, []byte{0x0C}), 16384, 0) // GPV
+	wantStack(t, runOps(t, it, []byte{0x0D}), 16384, 0) // GFV
+}
+
+func TestSFVTPV(t *testing.T) {
+	it := freshInterp()
+	runOps(t, it, []byte{0x00}) // SVTCA[y]: pv=fv={0,1}
+	runOps(t, it, []byte{0x03}) // SPVTCA[x]: pv={1,0}, fv stays {0,1}
+	runOps(t, it, []byte{0x0E}) // SFVTPV: fv := pv
+	if it.fv != (vec{1, 0}) {
+		t.Errorf("SFVTPV: fv=%v want {1 0}", it.fv)
+	}
+}
+
+func TestSPVTL_SFVTL(t *testing.T) {
+	it := freshInterp()
+	// A vertical line p0=(0,0) -> p1=(0,64).
+	setZone1(it, gpoint{curX: 0, curY: 0}, gpoint{curX: 0, curY: 64})
+	// SPVTL[0] (parallel): vector = p0-p1 normalised = (0,-1); dual follows.
+	runOps(t, it, cat(pb(0, 1), []byte{0x06}))
+	if it.pv != (vec{0, -1}) || it.dv != (vec{0, -1}) {
+		t.Errorf("SPVTL[0]: pv=%v dv=%v", it.pv, it.dv)
+	}
+	// SFVTL[1] (perpendicular): rotate (0,-64) 90° -> (64,0) -> (1,0).
+	runOps(t, it, cat(pb(0, 1), []byte{0x09}))
+	if it.fv != (vec{1, 0}) {
+		t.Errorf("SFVTL[1]: fv=%v want {1 0}", it.fv)
+	}
+	// Degenerate (coincident points) falls back to the x-axis.
+	setZone1(it, gpoint{curX: 5, curY: 5}, gpoint{curX: 5, curY: 5})
+	runOps(t, it, cat(pb(0, 1), []byte{0x06}))
+	if it.pv != (vec{1, 0}) {
+		t.Errorf("SPVTL degenerate: pv=%v want {1 0}", it.pv)
+	}
+	// Bad point index.
+	wantHintErr(t, it, cat(pb(0, 99), []byte{0x06}), "out of range")
+}
+
+func TestSDPVTL(t *testing.T) {
+	it := freshInterp()
+	// Original outline is a vertical line; current outline is horizontal.
+	setZone1(it,
+		gpoint{curX: 0, curY: 0, origX: 0, origY: 0},
+		gpoint{curX: 64, curY: 0, origX: 0, origY: 64},
+	)
+	runOps(t, it, cat(pb(0, 1), []byte{0x86})) // SDPVTL[0]
+	if it.dv != (vec{0, -1}) {
+		t.Errorf("SDPVTL dual: dv=%v want {0 -1}", it.dv)
+	}
+	if it.pv != (vec{-1, 0}) {
+		t.Errorf("SDPVTL proj: pv=%v want {-1 0}", it.pv)
+	}
+	wantHintErr(t, it, cat(pb(0, 99), []byte{0x86}), "out of range")
+}
+
+func TestSPVFS_SFVFS(t *testing.T) {
+	it := freshInterp()
+	// SPVFS pops y then x (F2Dot14): set the y-axis.
+	runOps(t, it, cat(pw(0, 16384), []byte{0x0A}))
+	if it.pv != (vec{0, 1}) || it.dv != (vec{0, 1}) {
+		t.Errorf("SPVFS: pv=%v dv=%v", it.pv, it.dv)
+	}
+	// SFVFS sets the freedom vector only.
+	runOps(t, it, cat(pw(0, 16384), []byte{0x0B}))
+	if it.fv != (vec{0, 1}) {
+		t.Errorf("SFVFS: fv=%v want {0 1}", it.fv)
+	}
+	// A zero vector from the stack falls back to the x-axis.
+	runOps(t, it, cat(pw(0, 0), []byte{0x0A}))
+	if it.pv != (vec{1, 0}) {
+		t.Errorf("SPVFS zero: pv=%v want {1 0}", it.pv)
+	}
+	wantHintErr(t, it, cat(pw(5), []byte{0x0A}), "underflow")
+}
+
+func TestMD(t *testing.T) {
+	it := freshInterp()
+	setZone1(it,
+		gpoint{curX: 0, curY: 0, origX: 0, origY: 0},
+		gpoint{curX: 128, curY: 0, origX: 64, origY: 0},
+	)
+	// MD[current] (0x49) measures the grid-fitted distance -> 128.
+	wantStack(t, runOps(t, it, cat(pb(1, 0), []byte{0x49})), 128)
+	// MD[original] (0x4A) measures the original outline -> 64.
+	wantStack(t, runOps(t, it, cat(pb(1, 0), []byte{0x4A})), 64)
+	wantHintErr(t, it, cat(pb(1, 99), []byte{0x49}), "out of range")
+}
+
+func TestMSIRP(t *testing.T) {
+	it := freshInterp()
+	// Non-twilight: move point 1 to distance 100 from rp0 (point 0 at origin).
+	setZone1(it, gpoint{curX: 0}, gpoint{curX: 20})
+	it.rp0 = 0
+	runOps(t, it, cat(pw(1, 100), []byte{0x3A})) // MSIRP[0]
+	if it.glyphZone[1].curX != 100 {
+		t.Errorf("MSIRP: curX=%d want 100", it.glyphZone[1].curX)
+	}
+	if it.rp2 != 1 || it.rp0 != 0 {
+		t.Errorf("MSIRP[0]: rp0=%d rp2=%d", it.rp0, it.rp2)
+	}
+	// MSIRP[1] additionally sets rp0.
+	setZone1(it, gpoint{curX: 0}, gpoint{curX: 20})
+	it.rp0 = 0
+	runOps(t, it, cat(pw(1, 100), []byte{0x3B}))
+	if it.rp0 != 1 {
+		t.Errorf("MSIRP[1] setRP0: rp0=%d want 1", it.rp0)
+	}
+	// Twilight: the point is seeded at rp0 then moved by the stack distance.
+	it2 := freshInterp()
+	setZone1(it2, gpoint{curX: 10, origX: 10})
+	it2.zp0, it2.rp0 = 1, 0
+	it2.zp1 = 0 // point taken from the twilight zone
+	runOps(t, it2, cat(pw(0, 50), []byte{0x3A}))
+	if it2.twilight[0].curX != 60 {
+		t.Errorf("MSIRP twilight: curX=%d want 60", it2.twilight[0].curX)
+	}
+	// Bad point.
+	it3 := freshInterp()
+	setZone1(it3, gpoint{curX: 0})
+	it3.rp0 = 0
+	wantHintErr(t, it3, cat(pw(99, 10), []byte{0x3A}), "out of range")
+}
+
+func TestISECT(t *testing.T) {
+	it := freshInterp()
+	// Line A horizontal (y=0), line B vertical (x=50): intersection (50,0).
+	setZone1(it,
+		gpoint{curX: 0, curY: 0},    // a0
+		gpoint{curX: 100, curY: 0},  // a1
+		gpoint{curX: 50, curY: -50}, // b0
+		gpoint{curX: 50, curY: 50},  // b1
+		gpoint{},                    // destination
+	)
+	runOps(t, it, cat(pb(4, 0, 1, 2, 3), []byte{0x0F}))
+	if it.glyphZone[4].curX != 50 || it.glyphZone[4].curY != 0 {
+		t.Errorf("ISECT: (%d,%d) want (50,0)", it.glyphZone[4].curX, it.glyphZone[4].curY)
+	}
+	if !it.glyphZone[4].tx || !it.glyphZone[4].ty {
+		t.Errorf("ISECT should touch both axes")
+	}
+	// Parallel lines -> average of the four endpoints (50,50).
+	setZone1(it,
+		gpoint{curX: 0, curY: 0},
+		gpoint{curX: 100, curY: 0},
+		gpoint{curX: 0, curY: 100},
+		gpoint{curX: 100, curY: 100},
+		gpoint{},
+	)
+	runOps(t, it, cat(pb(4, 0, 1, 2, 3), []byte{0x0F}))
+	if it.glyphZone[4].curX != 50 || it.glyphZone[4].curY != 50 {
+		t.Errorf("ISECT parallel: (%d,%d) want (50,50)", it.glyphZone[4].curX, it.glyphZone[4].curY)
+	}
+	// Bad destination point.
+	setZone1(it, gpoint{}, gpoint{}, gpoint{}, gpoint{})
+	wantHintErr(t, it, cat(pb(99, 0, 1, 2, 3), []byte{0x0F}), "out of range")
+}
+
+func TestALIGNPTS(t *testing.T) {
+	it := freshInterp()
+	setZone1(it, gpoint{curX: 0}, gpoint{curX: 100})
+	runOps(t, it, cat(pb(0, 1), []byte{0x27}))
+	if it.glyphZone[0].curX != 50 || it.glyphZone[1].curX != 50 {
+		t.Errorf("ALIGNPTS: %d %d want 50 50", it.glyphZone[0].curX, it.glyphZone[1].curX)
+	}
+	wantHintErr(t, it, cat(pb(0, 99), []byte{0x27}), "out of range")
+}
+
+func TestUTP(t *testing.T) {
+	it := freshInterp()
+	// Default freedom vector is x: UTP clears tx, leaves ty.
+	setZone1(it, gpoint{tx: true, ty: true})
+	runOps(t, it, cat(pb(0), []byte{0x29}))
+	if it.glyphZone[0].tx || !it.glyphZone[0].ty {
+		t.Errorf("UTP x: tx=%v ty=%v", it.glyphZone[0].tx, it.glyphZone[0].ty)
+	}
+	// Freedom vector on y clears ty, leaves tx.
+	it2 := freshInterp()
+	runOps(t, it2, []byte{0x00}) // SVTCA[y]
+	setZone1(it2, gpoint{tx: true, ty: true})
+	runOps(t, it2, cat(pb(0), []byte{0x29}))
+	if !it2.glyphZone[0].tx || it2.glyphZone[0].ty {
+		t.Errorf("UTP y: tx=%v ty=%v", it2.glyphZone[0].tx, it2.glyphZone[0].ty)
+	}
+	wantHintErr(t, it, cat(pb(99), []byte{0x29}), "out of range")
+}
+
+func TestSHC(t *testing.T) {
+	it := freshInterp()
+	// Reference point 0 moved +20 (cur 84 vs orig 64); shift the rest of the
+	// contour, leaving the reference point itself in place.
+	setZone1(it, gpoint{curX: 84, origX: 64}, gpoint{curX: 100}, gpoint{curX: 200})
+	it.rp2 = 0
+	runOps(t, it, cat(pb(0), []byte{0x34})) // SHC[0]
+	if it.glyphZone[0].curX != 84 || it.glyphZone[1].curX != 120 || it.glyphZone[2].curX != 220 {
+		t.Errorf("SHC[0]: %d %d %d", it.glyphZone[0].curX, it.glyphZone[1].curX, it.glyphZone[2].curX)
+	}
+	// SHC[1] uses rp1 in zp0.
+	setZone1(it, gpoint{curX: 84, origX: 64}, gpoint{curX: 100})
+	it.rp1 = 0
+	runOps(t, it, cat(pb(0), []byte{0x35}))
+	if it.glyphZone[1].curX != 120 {
+		t.Errorf("SHC[1]: curX=%d want 120", it.glyphZone[1].curX)
+	}
+	// Bad reference point.
+	it.rp2 = 99
+	wantHintErr(t, it, cat(pb(0), []byte{0x34}), "out of range")
+}
+
+func TestSHZ(t *testing.T) {
+	it := freshInterp()
+	setZone1(it, gpoint{curX: 84, origX: 64}, gpoint{curX: 100})
+	it.rp2 = 0
+	// SHZ[0] shifts the whole named zone (1), including the reference point.
+	runOps(t, it, cat(pb(1), []byte{0x36}))
+	if it.glyphZone[0].curX != 104 || it.glyphZone[1].curX != 120 {
+		t.Errorf("SHZ[0]: %d %d want 104 120", it.glyphZone[0].curX, it.glyphZone[1].curX)
+	}
+	// Bad zone number on the stack.
+	setZone1(it, gpoint{curX: 84, origX: 64})
+	it.rp2 = 0
+	wantHintErr(t, it, cat(pb(5), []byte{0x36}), "bad zone pointer")
+	// Bad reference point.
+	it.rp2 = 99
+	wantHintErr(t, it, cat(pb(0), []byte{0x36}), "out of range")
+}
+
+func TestFLIPPT(t *testing.T) {
+	it := freshInterp()
+	setZone1(it, gpoint{on: false}, gpoint{on: true})
+	it.loop = 2
+	runOps(t, it, cat(pb(0, 1), []byte{0x80}))
+	if !it.glyphZone[0].on || it.glyphZone[1].on {
+		t.Errorf("FLIPPT: on=%v %v", it.glyphZone[0].on, it.glyphZone[1].on)
+	}
+	if it.loop != 1 {
+		t.Errorf("FLIPPT should reset loop, got %d", it.loop)
+	}
+	wantHintErr(t, it, cat(pb(99), []byte{0x80}), "out of range")
+}
+
+func TestFLIPRange(t *testing.T) {
+	it := freshInterp()
+	setZone1(it, gpoint{}, gpoint{}, gpoint{})
+	runOps(t, it, cat(pb(0, 2), []byte{0x81})) // FLIPRGON 0..2
+	if !it.glyphZone[0].on || !it.glyphZone[1].on || !it.glyphZone[2].on {
+		t.Errorf("FLIPRGON: %v", it.glyphZone)
+	}
+	runOps(t, it, cat(pb(0, 2), []byte{0x82})) // FLIPRGOFF 0..2
+	if it.glyphZone[0].on || it.glyphZone[2].on {
+		t.Errorf("FLIPRGOFF: %v", it.glyphZone)
+	}
+	// Range out of bounds.
+	wantHintErr(t, it, cat(pb(0, 99), []byte{0x81}), "out of range")
+	// Empty stack underflows.
+	wantHintErr(t, it, []byte{0x81}, "underflow")
+}
+
+func TestINSTCTRL(t *testing.T) {
+	it := freshInterp()
+	runOps(t, it, cat(pb(1, 1), []byte{0x8E})) // selector 1, value 1 -> set bit
+	if it.instructControl != 1 {
+		t.Errorf("INSTCTRL set: %d want 1", it.instructControl)
+	}
+	runOps(t, it, cat(pb(0, 1), []byte{0x8E})) // selector 1, value 0 -> clear bit
+	if it.instructControl != 0 {
+		t.Errorf("INSTCTRL clear: %d want 0", it.instructControl)
+	}
+	// Unknown selector is ignored.
+	runOps(t, it, cat(pb(1, 3), []byte{0x8E}))
+	if it.instructControl != 0 {
+		t.Errorf("INSTCTRL unknown selector changed state: %d", it.instructControl)
+	}
+	wantHintErr(t, it, []byte{0x8E}, "underflow")
+}
+
+func TestSingleWidthAndFlags(t *testing.T) {
+	it := freshInterp()
+	// SSW takes font units (1000 -> 16px -> 1024 in 26.6).
+	runOps(t, it, cat(pw(1000), []byte{0x1F}))
+	if it.singleWidth != 1024 {
+		t.Errorf("SSW: %d want 1024", it.singleWidth)
+	}
+	// SSWCI is already in F26Dot6 pixels.
+	runOps(t, it, cat(pw(80), []byte{0x1E}))
+	if it.singleWidthCutIn != 80 {
+		t.Errorf("SSWCI: %d want 80", it.singleWidthCutIn)
+	}
+	// FLIPOFF / FLIPON toggle the auto-flip flag.
+	runOps(t, it, []byte{0x4E})
+	if it.autoFlip {
+		t.Error("FLIPOFF: autoFlip still true")
+	}
+	runOps(t, it, []byte{0x4D})
+	if !it.autoFlip {
+		t.Error("FLIPON: autoFlip still false")
+	}
+	// SCANCTRL / SCANTYPE record their argument.
+	runOps(t, it, cat(pb(5), []byte{0x85}))
+	runOps(t, it, cat(pb(2), []byte{0x8D}))
+	if it.scanControl != 5 || it.scanType != 2 {
+		t.Errorf("SCANCTRL/SCANTYPE: %d %d", it.scanControl, it.scanType)
+	}
+}
+
+func TestObsoleteConsumers(t *testing.T) {
+	it := freshInterp()
+	// SANGW, AA and DEBUG consume one argument and have no other effect.
+	for _, op := range []byte{0x7E, 0x7F, 0x4F} {
+		wantStack(t, runOps(t, it, cat(pb(1), []byte{op})))
+	}
+}
+
+func TestRoundNRoundOddEven(t *testing.T) {
+	it := freshInterp() // default rounding is RTG
+	// ROUND rounds to the grid; NROUND leaves the value unchanged.
+	wantStack(t, runOps(t, it, cat(pw(96), []byte{0x68})), 128) // ROUND[00]
+	wantStack(t, runOps(t, it, cat(pw(96), []byte{0x6C})), 96)  // NROUND[00]
+	// ODD/EVEN test the rounded pixel parity.
+	wantStack(t, runOps(t, it, cat(pw(64), []byte{0x56})), 1) // 64 -> 1px odd
+	wantStack(t, runOps(t, it, cat(pw(96), []byte{0x56})), 0) // 96 -> 2px even
+	wantStack(t, runOps(t, it, cat(pw(64), []byte{0x57})), 0) // ODD -> EVEN=0
+	wantStack(t, runOps(t, it, cat(pw(96), []byte{0x57})), 1) // 2px even
+}
+
+func TestGetVariationAndData(t *testing.T) {
+	it := freshInterp()
+	// GETVARIATION: no active variation, pushes no coordinates.
+	wantStack(t, runOps(t, it, []byte{0x91}))
+	// GETDATA returns the classic constant 17.
+	wantStack(t, runOps(t, it, []byte{0x92}), 17)
 }
