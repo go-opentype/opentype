@@ -13,8 +13,9 @@ type cmapLookup interface {
 }
 
 // parseCmap selects and decodes a Unicode cmap subtable. It understands
-// formats 0, 2, 4, 6, 12 and 13 for the base rune->glyph mapping, preferring
-// whichever can represent the most codepoints: 13 = 12 > 4 > 6 > 2 > 0.
+// formats 0, 2, 4, 6, 8, 10, 12 and 13 for the base rune->glyph mapping,
+// preferring whichever can represent the most codepoints:
+// 13 = 12 > 10 > 8 > 4 > 6 > 2 > 0.
 // Format 14 (Unicode Variation Sequences) is a separate, always-parsed side
 // table exposed through Font.GlyphIndexVariation; it never competes for f.cmap
 // and its presence does not change ordinary GlyphIndex behaviour.
@@ -57,12 +58,18 @@ func (f *Font) parseCmap(b []byte) error {
 		case 4:
 			lk, err = parseCmap4(sub)
 			score = 4
+		case 8:
+			lk, err = parseCmap8(sub)
+			score = 5
+		case 10:
+			lk, err = parseCmap10(sub)
+			score = 6
 		case 12:
 			lk, err = parseCmap12(sub)
-			score = 5
+			score = 7
 		case 13:
 			lk, err = parseCmap13(sub)
-			score = 5
+			score = 7
 		case 14:
 			vs, verr := parseCmap14(sub)
 			if verr != nil {
@@ -282,6 +289,75 @@ func (c *cmap13) lookup(r rune) (GlyphIndex, bool) {
 	return 0, false
 }
 
+// cmap8Group is one sequential-map group of a format-8 subtable; identical in
+// shape and semantics to a format-12 group (a range advancing one glyph per
+// code point from startGID).
+type cmap8Group struct {
+	start    uint32
+	end      uint32
+	startGID uint32
+}
+
+// cmap8 is a decoded format-8 (mixed 16/32-bit coverage) subtable. is32 is
+// the on-disk 65536-bit bitmap (8192 bytes) flagging which 16-bit lead code
+// units begin a 32-bit (surrogate-pair) character rather than standing alone
+// as a BMP character; it is retained for spec fidelity but, like other
+// implementations, is not consulted by lookup, since lookup already receives
+// a fully decoded rune rather than raw UTF-16 code units — the groups alone
+// are sufficient to resolve it, exactly as in format 12.
+type cmap8 struct {
+	is32   [8192]byte
+	groups []cmap8Group
+}
+
+// parseCmap8 decodes a format-8 subtable from sub (starting at the format
+// field).
+func parseCmap8(sub []byte) (cmapLookup, error) {
+	r := reader{b: sub}
+	r.skip(12) // format, reserved, length, language
+	var c cmap8
+	for i := range c.is32 {
+		c.is32[i] = r.u8()
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 8 is32: %w", r.err)
+	}
+	numGroups := int(r.u32())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 8 header: %w", r.err)
+	}
+	c.groups = make([]cmap8Group, numGroups)
+	for i := range c.groups {
+		c.groups[i].start = r.u32()
+		c.groups[i].end = r.u32()
+		c.groups[i].startGID = r.u32()
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 8 groups: %w", r.err)
+	}
+	return &c, nil
+}
+
+// lookup implements the format-8 binary search over sorted groups, the same
+// algorithm as format 12's lookup (the is32 bitmap plays no role once the
+// input is already a decoded rune).
+func (c *cmap8) lookup(r rune) (GlyphIndex, bool) {
+	cc := uint32(r)
+	lo, hi := 0, len(c.groups)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		g := c.groups[mid]
+		if cc < g.start {
+			hi = mid
+		} else if cc > g.end {
+			lo = mid + 1
+		} else {
+			return GlyphIndex(g.startGID + (cc - g.start)), true
+		}
+	}
+	return 0, false
+}
+
 // cmap0 is a decoded format-0 (byte encoding table) subtable: a flat 256-byte
 // glyph-id array covering U+0000-U+00FF.
 type cmap0 struct {
@@ -350,6 +426,52 @@ func (c *cmap6) lookup(r rune) (GlyphIndex, bool) {
 		return 0, false
 	}
 	idx := uint32(r) - uint32(c.firstCode)
+	if idx >= uint32(len(c.glyphIDArray)) {
+		return 0, false
+	}
+	g := c.glyphIDArray[idx]
+	if g == 0 {
+		return 0, false
+	}
+	return GlyphIndex(g), true
+}
+
+// cmap10 is a decoded format-10 (trimmed array) subtable: the 32-bit
+// analogue of format 6 — a contiguous, zero-based glyph-id array starting at
+// startCharCode, wide enough to cover astral code points.
+type cmap10 struct {
+	startCharCode uint32
+	glyphIDArray  []uint16
+}
+
+// parseCmap10 decodes a format-10 subtable from sub (starting at the format
+// field).
+func parseCmap10(sub []byte) (cmapLookup, error) {
+	r := reader{b: sub}
+	r.skip(12) // format, reserved, length, language
+	startCharCode := r.u32()
+	numChars := int(r.u32())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 10 header: %w", r.err)
+	}
+	c := &cmap10{startCharCode: startCharCode, glyphIDArray: make([]uint16, numChars)}
+	for i := range c.glyphIDArray {
+		c.glyphIDArray[i] = r.u16()
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 10: %w", r.err)
+	}
+	return c, nil
+}
+
+// lookup returns the trimmed-table entry for r, or false when r falls
+// outside [startCharCode, startCharCode+len(glyphIDArray)) or maps to
+// .notdef.
+func (c *cmap10) lookup(r rune) (GlyphIndex, bool) {
+	if uint32(r) < c.startCharCode {
+		return 0, false
+	}
+	idx := uint32(r) - c.startCharCode
 	if idx >= uint32(len(c.glyphIDArray)) {
 		return 0, false
 	}
