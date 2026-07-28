@@ -40,11 +40,22 @@ import (
 type gpos struct {
 	layoutHeader
 	lookups []gposLookup
+	gdef    *gdefTable // font GDEF (nil when absent); drives glyph skipping
+}
+
+// skipperFor builds the glyph skipper for lookup lk from the table's GDEF and
+// the lookup's flag and mark-filtering set.
+func (p *gpos) skipperFor(lk gposLookup) skipper {
+	return skipper{gdef: p.gdef, flag: lk.flag, markFilterSet: lk.markSet}
 }
 
 // gposLookup is one decoded GPOS Lookup: its supported positioning subtables.
+// flag is the lookup's lookupFlag and markSet its mark-filtering-set index;
+// with the font's GDEF table they drive which glyphs the lookup skips.
 type gposLookup struct {
 	subtables []posSubtable
+	flag      uint16
+	markSet   uint16
 }
 
 // posSubtable applies a positioning adjustment at index i of a glyph run whose
@@ -143,11 +154,15 @@ func parseGPOS(b []byte) (*gpos, error) {
 func parseGPOSLookup(b []byte) (gposLookup, error) {
 	r := reader{b: b}
 	lookupType := r.u16()
-	r.skip(2) // lookupFlag
+	flag := r.u16()
 	subCount := int(r.u16())
 	offs := make([]int, subCount)
 	for i := 0; i < subCount; i++ {
 		offs[i] = int(r.u16())
+	}
+	var markSet uint16
+	if flag&flagUseMarkFilteringSet != 0 {
+		markSet = r.u16() // markFilteringSet follows the subtable offsets
 	}
 	if r.err != nil {
 		return gposLookup{}, fmt.Errorf("opentype: gpos lookup: %w", r.err)
@@ -162,7 +177,7 @@ func parseGPOSLookup(b []byte) (gposLookup, error) {
 			subs = append(subs, st)
 		}
 	}
-	return gposLookup{subtables: subs}, nil
+	return gposLookup{subtables: subs, flag: flag, markSet: markSet}, nil
 }
 
 // parseGPOSSubtable decodes one subtable of the given lookup type. A deferred
@@ -452,10 +467,11 @@ func (p *pairPos1) kern(left, right GlyphIndex) (int, bool) {
 }
 
 func (p *pairPos1) apply(ctx *posContext, i int) bool {
-	if i+1 >= len(ctx.glyphs) {
+	j := ctx.skip.next(ctx.glyphs, i+1)
+	if j >= len(ctx.glyphs) {
 		return false
 	}
-	v, ok := p.kern(ctx.glyphs[i], ctx.glyphs[i+1])
+	v, ok := p.kern(ctx.glyphs[i], ctx.glyphs[j])
 	if !ok {
 		return false
 	}
@@ -520,10 +536,11 @@ func (p *pairPos2) kern(left, right GlyphIndex) (int, bool) {
 }
 
 func (p *pairPos2) apply(ctx *posContext, i int) bool {
-	if i+1 >= len(ctx.glyphs) {
+	j := ctx.skip.next(ctx.glyphs, i+1)
+	if j >= len(ctx.glyphs) {
 		return false
 	}
-	v, ok := p.kern(ctx.glyphs[i], ctx.glyphs[i+1])
+	v, ok := p.kern(ctx.glyphs[i], ctx.glyphs[j])
 	if !ok {
 		return false
 	}
@@ -579,10 +596,11 @@ func (c *cursivePos) apply(ctx *posContext, i int) bool {
 	if !ok {
 		return false
 	}
-	if i+1 >= len(ctx.glyphs) {
+	j := ctx.skip.next(ctx.glyphs, i+1)
+	if j >= len(ctx.glyphs) {
 		return false
 	}
-	ni, ok := c.cov[ctx.glyphs[i+1]]
+	ni, ok := c.cov[ctx.glyphs[j]]
 	if !ok {
 		return false
 	}
@@ -593,10 +611,17 @@ func (c *cursivePos) apply(ctx *posContext, i int) bool {
 	if ex == nil || en == nil {
 		return false
 	}
-	// Place the entry anchor of the following glyph onto the exit anchor of the
-	// current glyph, forming a cursive join.
-	ctx.positions[i+1].XOffset += ex.x - en.x
-	ctx.positions[i+1].YOffset += ex.y - en.y
+	// Join the exit anchor of the current glyph to the entry anchor of the next.
+	// Left-to-right, the following glyph is moved so its entry meets the current
+	// exit; right-to-left, the current glyph is moved so its exit meets the next
+	// glyph's entry.
+	if ctx.skip.rtl() {
+		ctx.positions[i].XOffset += en.x - ex.x
+		ctx.positions[i].YOffset += en.y - ex.y
+	} else {
+		ctx.positions[j].XOffset += ex.x - en.x
+		ctx.positions[j].YOffset += ex.y - en.y
+	}
 	return true
 }
 
@@ -667,6 +692,11 @@ func (m *markBasePos) apply(ctx *posContext, i int) bool {
 	}
 	mr := m.marks[mi]
 	for b := i - 1; b >= 0; b-- {
+		// A base glyph is the nearest preceding non-skipped, non-mark glyph: skip
+		// glyphs the lookup ignores and any GDEF mark (a mark cannot be a base).
+		if ctx.skip.skip(ctx.glyphs[b]) || ctx.skip.isMark(ctx.glyphs[b]) {
+			continue
+		}
 		bi, ok := m.baseCov[ctx.glyphs[b]]
 		if !ok {
 			continue
@@ -760,6 +790,10 @@ func (m *markLigPos) apply(ctx *posContext, i int) bool {
 	}
 	mr := m.marks[mi]
 	for b := i - 1; b >= 0; b-- {
+		// The base ligature is the nearest preceding non-skipped, non-mark glyph.
+		if ctx.skip.skip(ctx.glyphs[b]) || ctx.skip.isMark(ctx.glyphs[b]) {
+			continue
+		}
 		li, ok := m.ligCov[ctx.glyphs[b]]
 		if !ok {
 			continue
@@ -831,6 +865,11 @@ func (m *markMarkPos) apply(ctx *posContext, i int) bool {
 	}
 	mr := m.marks[mi]
 	for b := i - 1; b >= 0; b-- {
+		// The base mark is the nearest preceding non-skipped glyph (it is itself a
+		// mark, so marks are not skipped here — only the lookup's own ignores).
+		if ctx.skip.skip(ctx.glyphs[b]) {
+			continue
+		}
 		bi, ok := m.mark2Cov[ctx.glyphs[b]]
 		if !ok {
 			continue
@@ -867,58 +906,27 @@ func readPosLookupRecords(r *reader, n int) []posLookupRecord {
 	return recs
 }
 
-// matchGlyphs reports whether glyphs[start+k] == seq[k] for all k (bounds
-// checked).
-func matchGlyphs(glyphs []GlyphIndex, start int, seq []GlyphIndex) bool {
-	if start < 0 || start+len(seq) > len(glyphs) {
-		return false
+// glyphPredsG builds glyph-id-equality predicates from a GlyphIndex sequence
+// (the in-memory form of GPOS input, backtrack and lookahead sequences).
+func glyphPredsG(seq []GlyphIndex) []glyphPred {
+	preds := make([]glyphPred, len(seq))
+	for k := range seq {
+		v := seq[k]
+		preds[k] = func(g GlyphIndex) bool { return g == v }
 	}
-	for k, g := range seq {
-		if glyphs[start+k] != g {
-			return false
-		}
-	}
-	return true
+	return preds
 }
 
-// matchBacktrack reports whether the backtrack sequence matches the glyphs
-// preceding index i (back[k] against glyphs[i-1-k]).
-func matchBacktrack(glyphs []GlyphIndex, i int, back []GlyphIndex) bool {
-	for k, g := range back {
-		j := i - 1 - k
-		if j < 0 || glyphs[j] != g {
-			return false
-		}
+// classPredsG builds class-equality predicates from a GlyphIndex class sequence
+// (stored with the on-disk class values of a Pos(Chain)ClassRule) and a
+// ClassDef map; glyphs absent from cd fall in class 0.
+func classPredsG(seq []GlyphIndex, cd map[GlyphIndex]int) []glyphPred {
+	preds := make([]glyphPred, len(seq))
+	for k := range seq {
+		v := int(seq[k])
+		preds[k] = func(g GlyphIndex) bool { return classOf(cd, g) == v }
 	}
-	return true
-}
-
-// matchClasses reports whether the classes of glyphs[start+k] equal seq[k] for
-// all k (bounds checked). The class sequence is stored with the on-disk
-// glyph-index-typed class values of a Pos(Chain)ClassRule, so glyphs absent
-// from cd fall in class 0.
-func matchClasses(glyphs []GlyphIndex, start int, seq []GlyphIndex, cd map[GlyphIndex]int) bool {
-	if start < 0 || start+len(seq) > len(glyphs) {
-		return false
-	}
-	for k, c := range seq {
-		if classOf(cd, glyphs[start+k]) != int(c) {
-			return false
-		}
-	}
-	return true
-}
-
-// matchBacktrackClasses reports whether the backtrack class sequence matches the
-// classes of the glyphs preceding index i (seq[k] against glyphs[i-1-k]).
-func matchBacktrackClasses(glyphs []GlyphIndex, i int, seq []GlyphIndex, cd map[GlyphIndex]int) bool {
-	for k, c := range seq {
-		j := i - 1 - k
-		if j < 0 || classOf(cd, glyphs[j]) != int(c) {
-			return false
-		}
-	}
-	return true
+	return preds
 }
 
 // posRule is one contextual (type 7 format 1) rule: an input sequence (from the
@@ -1015,10 +1023,12 @@ func (c *contextPos2) apply(ctx *posContext, i int) bool {
 		return false
 	}
 	for _, rule := range c.sets[cls] {
-		if matchClasses(ctx.glyphs, i+1, rule.input, c.classDef) {
-			ctx.applyRecords(rule.recs, i)
-			return true
+		matched, _, ok := ctx.skip.matchForward(ctx.glyphs, i+1, classPredsG(rule.input, c.classDef))
+		if !ok {
+			continue
 		}
+		ctx.applyRecords(rule.recs, append([]int{i}, matched...))
+		return true
 	}
 	return false
 }
@@ -1098,10 +1108,12 @@ func (c *contextPos1) apply(ctx *posContext, i int) bool {
 		return false
 	}
 	for _, rule := range c.sets[ci] {
-		if matchGlyphs(ctx.glyphs, i+1, rule.input) {
-			ctx.applyRecords(rule.recs, i)
-			return true
+		matched, _, ok := ctx.skip.matchForward(ctx.glyphs, i+1, glyphPredsG(rule.input))
+		if !ok {
+			continue
 		}
+		ctx.applyRecords(rule.recs, append([]int{i}, matched...))
+		return true
 	}
 	return false
 }
@@ -1128,16 +1140,11 @@ func parseContextPos3(b []byte) (posSubtable, error) {
 }
 
 func (c *contextPos3) apply(ctx *posContext, i int) bool {
-	for k, cov := range c.covs {
-		j := i + k
-		if j >= len(ctx.glyphs) {
-			return false
-		}
-		if _, ok := cov[ctx.glyphs[j]]; !ok {
-			return false
-		}
+	matched, _, ok := ctx.skip.matchContext(ctx.glyphs, i, c.covs)
+	if !ok {
+		return false
 	}
-	ctx.applyRecords(c.recs, i)
+	ctx.applyRecords(c.recs, matched)
 	return true
 }
 
@@ -1264,12 +1271,16 @@ func (c *chainPos2) apply(ctx *posContext, i int) bool {
 		return false
 	}
 	for _, rule := range c.sets[cls] {
-		if matchBacktrackClasses(ctx.glyphs, i, rule.back, c.backtrack) &&
-			matchClasses(ctx.glyphs, i+1, rule.input, c.input) &&
-			matchClasses(ctx.glyphs, i+1+len(rule.input), rule.ahead, c.lookahead) {
-			ctx.applyRecords(rule.recs, i)
-			return true
+		matched, end, ok := ctx.skip.matchForward(ctx.glyphs, i+1, classPredsG(rule.input, c.input))
+		if !ok ||
+			!ctx.skip.matchBackward(ctx.glyphs, i-1, classPredsG(rule.back, c.backtrack)) {
+			continue
 		}
+		if _, _, ok := ctx.skip.matchForward(ctx.glyphs, end, classPredsG(rule.ahead, c.lookahead)); !ok {
+			continue
+		}
+		ctx.applyRecords(rule.recs, append([]int{i}, matched...))
+		return true
 	}
 	return false
 }
@@ -1359,12 +1370,16 @@ func (c *chainPos1) apply(ctx *posContext, i int) bool {
 		return false
 	}
 	for _, rule := range c.sets[ci] {
-		if matchBacktrack(ctx.glyphs, i, rule.back) &&
-			matchGlyphs(ctx.glyphs, i+1, rule.input) &&
-			matchGlyphs(ctx.glyphs, i+1+len(rule.input), rule.ahead) {
-			ctx.applyRecords(rule.recs, i)
-			return true
+		matched, end, ok := ctx.skip.matchForward(ctx.glyphs, i+1, glyphPredsG(rule.input))
+		if !ok ||
+			!ctx.skip.matchBackward(ctx.glyphs, i-1, glyphPredsG(rule.back)) {
+			continue
 		}
+		if _, _, ok := ctx.skip.matchForward(ctx.glyphs, end, glyphPredsG(rule.ahead)); !ok {
+			continue
+		}
+		ctx.applyRecords(rule.recs, append([]int{i}, matched...))
+		return true
 	}
 	return false
 }
@@ -1409,35 +1424,15 @@ func readOffsets(r *reader, n int) []int {
 }
 
 func (c *chainPos3) apply(ctx *posContext, i int) bool {
-	for k, cov := range c.back {
-		j := i - 1 - k
-		if j < 0 {
-			return false
-		}
-		if _, ok := cov[ctx.glyphs[j]]; !ok {
-			return false
-		}
+	matched, end, ok := ctx.skip.matchContext(ctx.glyphs, i, c.input)
+	if !ok ||
+		!ctx.skip.matchBackward(ctx.glyphs, i-1, covPreds(c.back)) {
+		return false
 	}
-	for k, cov := range c.input {
-		j := i + k
-		if j >= len(ctx.glyphs) {
-			return false
-		}
-		if _, ok := cov[ctx.glyphs[j]]; !ok {
-			return false
-		}
+	if _, _, ok := ctx.skip.matchForward(ctx.glyphs, end, covPreds(c.ahead)); !ok {
+		return false
 	}
-	base := i + len(c.input)
-	for k, cov := range c.ahead {
-		j := base + k
-		if j >= len(ctx.glyphs) {
-			return false
-		}
-		if _, ok := cov[ctx.glyphs[j]]; !ok {
-			return false
-		}
-	}
-	ctx.applyRecords(c.recs, i)
+	ctx.applyRecords(c.recs, matched)
 	return true
 }
 
@@ -1468,6 +1463,7 @@ type posContext struct {
 	glyphs    []GlyphIndex
 	positions []GlyphPosition
 	advances  []int
+	skip      skipper // skipper of the lookup currently being applied
 }
 
 // advance returns the effective X advance of glyph k (its base advance, when
@@ -1480,22 +1476,33 @@ func (ctx *posContext) advance(k int) int {
 	return a
 }
 
-// applyRecords runs a context's PosLookupRecords, each nesting a lookup at the
-// input position given by its sequence index relative to at.
-func (ctx *posContext) applyRecords(recs []posLookupRecord, at int) {
+// applyRecords runs a context's PosLookupRecords. positions holds the absolute
+// run indices of the matched input glyphs (skipped glyphs excluded), so a
+// record's seqIndex selects the position it acts on; a record whose seqIndex
+// lies past the matched input is a no-op.
+func (ctx *posContext) applyRecords(recs []posLookupRecord, positions []int) {
 	for _, rec := range recs {
-		ctx.g.applyLookupAt(int(rec.lookupIndex), ctx, at+int(rec.seqIndex))
+		si := int(rec.seqIndex)
+		if si >= len(positions) {
+			continue
+		}
+		ctx.g.applyLookupAt(int(rec.lookupIndex), ctx, positions[si])
 	}
 }
 
 // applyLookup applies one lookup left-to-right across the whole run, taking the
-// first subtable that matches at each position.
+// first subtable that matches at each position. A glyph the lookup's flags
+// ignore is not a starting position and is skipped.
 func (p *gpos) applyLookup(li int, ctx *posContext) {
 	if li < 0 || li >= len(p.lookups) {
 		return
 	}
 	lk := p.lookups[li]
+	ctx.skip = p.skipperFor(lk)
 	for i := 0; i < len(ctx.glyphs); i++ {
+		if ctx.skip.skip(ctx.glyphs[i]) {
+			continue
+		}
 		for _, st := range lk.subtables {
 			if st.apply(ctx, i) {
 				break
@@ -1505,7 +1512,9 @@ func (p *gpos) applyLookup(li int, ctx *posContext) {
 }
 
 // applyLookupAt applies one lookup at a single run position, taking the first
-// matching subtable; it reports whether any subtable matched.
+// matching subtable; it reports whether any subtable matched. The nested lookup
+// matches under its own lookupFlag, so the context's skipper is swapped for the
+// duration and restored afterwards.
 func (p *gpos) applyLookupAt(li int, ctx *posContext, i int) bool {
 	if li < 0 || li >= len(p.lookups) {
 		return false
@@ -1513,12 +1522,17 @@ func (p *gpos) applyLookupAt(li int, ctx *posContext, i int) bool {
 	if i < 0 || i >= len(ctx.glyphs) {
 		return false
 	}
+	saved := ctx.skip
+	ctx.skip = p.skipperFor(p.lookups[li])
+	matched := false
 	for _, st := range p.lookups[li].subtables {
 		if st.apply(ctx, i) {
-			return true
+			matched = true
+			break
 		}
 	}
-	return false
+	ctx.skip = saved
+	return matched
 }
 
 // position applies the GPOS lookups activated by the given feature tags over a
