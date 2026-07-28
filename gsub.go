@@ -40,14 +40,19 @@ const maxGSUBNest = 64
 type gsub struct {
 	layoutHeader
 	lookups []gsubLookup
+	gdef    *gdefTable // font GDEF (nil when absent); drives glyph skipping
 }
 
 // gsubLookup is one decoded GSUB Lookup: its (supported) subtables. reverse is
 // set when the lookup performs reverse chaining single substitution (type 8),
-// which is applied to the glyph run back-to-front.
+// which is applied to the glyph run back-to-front. flag is the lookup's
+// lookupFlag and markSet its mark-filtering-set index; together with the font's
+// GDEF table they drive which glyphs the lookup skips while matching.
 type gsubLookup struct {
 	subtables []gsubSubtable
 	reverse   bool
+	flag      uint16
+	markSet   uint16
 }
 
 // gsubApplier carries the state threaded through a GSUB pass: the full lookup
@@ -62,6 +67,14 @@ type gsubApplier struct {
 	lookups  []gsubLookup
 	depth    int
 	clusters []int
+	gdef     *gdefTable // font GDEF (nil when absent); drives glyph skipping
+	skip     skipper    // skipper of the lookup currently being applied
+}
+
+// skipperFor builds the glyph skipper for lookup lk from the applier's GDEF
+// table and the lookup's flag and mark-filtering set.
+func (a *gsubApplier) skipperFor(lk gsubLookup) skipper {
+	return skipper{gdef: a.gdef, flag: lk.flag, markFilterSet: lk.markSet}
 }
 
 // gsubSubtable attempts a substitution at position i of a glyph run. On success
@@ -141,11 +154,15 @@ func parseGSUB(b []byte) (*gsub, error) {
 func parseGSUBLookup(b []byte) (gsubLookup, error) {
 	r := reader{b: b}
 	lookupType := r.u16()
-	r.skip(2) // lookupFlag
+	flag := r.u16()
 	subCount := int(r.u16())
 	offs := make([]int, subCount)
 	for i := 0; i < subCount; i++ {
 		offs[i] = int(r.u16())
+	}
+	var markSet uint16
+	if flag&flagUseMarkFilteringSet != 0 {
+		markSet = r.u16() // markFilteringSet follows the subtable offsets
 	}
 	if r.err != nil {
 		return gsubLookup{}, fmt.Errorf("opentype: gsub lookup: %w", r.err)
@@ -160,7 +177,7 @@ func parseGSUBLookup(b []byte) (gsubLookup, error) {
 			subs = append(subs, st)
 		}
 	}
-	gl := gsubLookup{subtables: subs}
+	gl := gsubLookup{subtables: subs, flag: flag, markSet: markSet}
 	for _, st := range subs {
 		if _, ok := st.(*gsubReverseChain1); ok {
 			gl.reverse = true
@@ -468,25 +485,29 @@ func (s *gsubLigature1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex
 		return g, i, false
 	}
 	for _, lig := range s.sets[ci] {
-		n := len(lig.rest)
-		if i+1+n > len(g) {
+		matched, _, ok := a.skip.matchForward(g, i+1, glyphPredsGI(lig.rest))
+		if !ok {
 			continue
 		}
-		match := true
-		for k, c := range lig.rest {
-			if g[i+1+k] != c {
-				match = false
-				break
+		// Replace the first component with the ligature and delete the other
+		// matched components, keeping any skipped glyphs (marks) that fell
+		// between them in place.
+		rem := make(map[int]bool, len(matched))
+		for _, p := range matched {
+			rem[p] = true
+		}
+		out := make([]GlyphIndex, 0, len(g)-len(matched))
+		for k := 0; k < len(g); k++ {
+			switch {
+			case k == i:
+				out = append(out, lig.glyph)
+			case rem[k]:
+				// deleted component
+			default:
+				out = append(out, g[k])
 			}
 		}
-		if !match {
-			continue
-		}
-		out := make([]GlyphIndex, 0, len(g)-n)
-		out = append(out, g[:i]...)
-		out = append(out, lig.glyph)
-		out = append(out, g[i+1+n:]...)
-		a.spliceClusters(i, 1+n, 1)
+		a.spliceLigClusters(i, matched)
 		return out, i + 1, true
 	}
 	return g, i, false
@@ -513,119 +534,105 @@ func (a *gsubApplier) spliceClusters(i, consumed, produced int) {
 	a.clusters = nc
 }
 
+// spliceLigClusters mirrors, on the tracked cluster slice, a ligature that
+// replaced the first component at i and deleted the components at the `removed`
+// positions (which may be non-adjacent when skipped marks fell between them).
+// The ligature slot keeps the first component's cluster; the deleted components
+// drop and every other glyph (including any interleaved marks) keeps its own. It
+// is a no-op when tracking is off (clusters nil).
+func (a *gsubApplier) spliceLigClusters(i int, removed []int) {
+	if a.clusters == nil {
+		return
+	}
+	rem := make(map[int]bool, len(removed))
+	for _, p := range removed {
+		rem[p] = true
+	}
+	nc := make([]int, 0, len(a.clusters)-len(removed))
+	for k, cl := range a.clusters {
+		if rem[k] {
+			continue
+		}
+		nc = append(nc, cl)
+	}
+	a.clusters = nc
+}
+
 // --- Sequence-matching helpers (shared by types 5, 6 and 8) -----------------
 
 // classOf returns the class of glyph g in a ClassDef map; glyphs absent from the
 // map belong to class 0.
 func classOf(m map[GlyphIndex]int, g GlyphIndex) int { return m[g] }
 
-// matchGlyphSeq reports whether the glyphs at g[start:] equal seq. Callers only
-// ever pass a non-negative start (a position at or after the current glyph).
-func matchGlyphSeq(g []GlyphIndex, start int, seq []uint16) bool {
-	if start+len(seq) > len(g) {
-		return false
+// glyphPredsU builds glyph-id-equality predicates from a uint16 sequence (the
+// on-disk form of GSUB input, backtrack and lookahead glyph sequences).
+func glyphPredsU(seq []uint16) []glyphPred {
+	preds := make([]glyphPred, len(seq))
+	for k := range seq {
+		v := seq[k]
+		preds[k] = func(g GlyphIndex) bool { return uint16(g) == v }
 	}
-	for k, v := range seq {
-		if uint16(g[start+k]) != v {
-			return false
-		}
-	}
-	return true
+	return preds
 }
 
-// matchBacktrackGlyphs matches seq against g[i-1], g[i-2], ... (reverse order).
-func matchBacktrackGlyphs(g []GlyphIndex, i int, seq []uint16) bool {
-	if i-len(seq) < 0 {
-		return false
+// glyphPredsGI builds glyph-id-equality predicates from a GlyphIndex sequence
+// (used for ligature component matching).
+func glyphPredsGI(seq []GlyphIndex) []glyphPred {
+	preds := make([]glyphPred, len(seq))
+	for k := range seq {
+		v := seq[k]
+		preds[k] = func(g GlyphIndex) bool { return g == v }
 	}
-	for k, v := range seq {
-		if uint16(g[i-1-k]) != v {
-			return false
-		}
-	}
-	return true
+	return preds
 }
 
-// matchClassSeq matches the classes of g[start:] against seq.
-func matchClassSeq(g []GlyphIndex, start int, seq []uint16, cd map[GlyphIndex]int) bool {
-	if start+len(seq) > len(g) {
-		return false
+// classPredsU builds class-equality predicates from a uint16 class sequence and
+// a ClassDef map.
+func classPredsU(seq []uint16, cd map[GlyphIndex]int) []glyphPred {
+	preds := make([]glyphPred, len(seq))
+	for k := range seq {
+		v := int(seq[k])
+		preds[k] = func(g GlyphIndex) bool { return classOf(cd, g) == v }
 	}
-	for k, v := range seq {
-		if classOf(cd, g[start+k]) != int(v) {
-			return false
-		}
-	}
-	return true
-}
-
-// matchBacktrackClass matches seq against the classes of g[i-1], g[i-2], ...
-func matchBacktrackClass(g []GlyphIndex, i int, seq []uint16, cd map[GlyphIndex]int) bool {
-	if i-len(seq) < 0 {
-		return false
-	}
-	for k, v := range seq {
-		if classOf(cd, g[i-1-k]) != int(v) {
-			return false
-		}
-	}
-	return true
-}
-
-// matchCovSeq reports whether each g[start+k] is covered by covs[k].
-func matchCovSeq(g []GlyphIndex, start int, covs []map[GlyphIndex]int) bool {
-	if start < 0 || start+len(covs) > len(g) {
-		return false
-	}
-	for k, c := range covs {
-		if _, ok := c[g[start+k]]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
-// matchBacktrackCov matches covs against g[i-1], g[i-2], ... (reverse order).
-func matchBacktrackCov(g []GlyphIndex, i int, covs []map[GlyphIndex]int) bool {
-	if i-len(covs) < 0 {
-		return false
-	}
-	for k, c := range covs {
-		if _, ok := c[g[i-1-k]]; !ok {
-			return false
-		}
-	}
-	return true
+	return preds
 }
 
 // --- Nested lookup application ----------------------------------------------
 
-// runRecords applies the SequenceLookupRecords of a matched context. base is the
-// run index of the first input glyph; each record's seqIndex is relative to it.
-func (a *gsubApplier) runRecords(recs []seqLookupRecord, g []GlyphIndex, base int) []GlyphIndex {
+// runRecords applies the SequenceLookupRecords of a matched context. positions
+// holds the absolute run indices of the matched input glyphs (skipped glyphs
+// excluded), so a record's seqIndex selects the position it acts on. A record
+// whose seqIndex lies past the matched input, or that targets a run position no
+// longer present after an earlier record rewrote the run, is a no-op.
+func (a *gsubApplier) runRecords(recs []seqLookupRecord, g []GlyphIndex, positions []int) []GlyphIndex {
 	for _, rec := range recs {
-		pos := base + int(rec.seqIndex)
-		if pos < 0 || pos >= len(g) {
+		si := int(rec.seqIndex)
+		if si >= len(positions) || positions[si] >= len(g) {
 			continue
 		}
-		g = a.applyLookupAt(int(rec.lookupIndex), g, pos)
+		g = a.applyLookupAt(int(rec.lookupIndex), g, positions[si])
 	}
 	return g
 }
 
 // applyLookupAt applies lookup li at a single position, taking the first
 // matching subtable. Out-of-range indices and excessive recursion are no-ops.
+// The nested lookup matches under its own lookupFlag, so the applier's skipper
+// is swapped for the duration and restored afterwards.
 func (a *gsubApplier) applyLookupAt(li int, g []GlyphIndex, pos int) []GlyphIndex {
 	if li < 0 || li >= len(a.lookups) || a.depth >= maxGSUBNest {
 		return g
 	}
 	a.depth++
+	saved := a.skip
+	a.skip = a.skipperFor(a.lookups[li])
 	for _, st := range a.lookups[li].subtables {
 		if out, _, ok := st.sub(a, g, pos); ok {
 			g = out
 			break
 		}
 	}
+	a.skip = saved
 	a.depth--
 	return g
 }
@@ -774,11 +781,12 @@ func (s *gsubContext1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex,
 		return g, i, false
 	}
 	for _, rule := range s.sets[ci] {
-		if !matchGlyphSeq(g, i+1, rule.input) {
+		matched, end, ok := a.skip.matchForward(g, i+1, glyphPredsU(rule.input))
+		if !ok {
 			continue
 		}
-		out := a.runRecords(rule.records, g, i)
-		return out, i + 1 + len(rule.input), true
+		out := a.runRecords(rule.records, g, append([]int{i}, matched...))
+		return out, end, true
 	}
 	return g, i, false
 }
@@ -792,21 +800,23 @@ func (s *gsubContext2) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex,
 		return g, i, false
 	}
 	for _, rule := range s.sets[cls] {
-		if !matchClassSeq(g, i+1, rule.input, s.classDef) {
+		matched, end, ok := a.skip.matchForward(g, i+1, classPredsU(rule.input, s.classDef))
+		if !ok {
 			continue
 		}
-		out := a.runRecords(rule.records, g, i)
-		return out, i + 1 + len(rule.input), true
+		out := a.runRecords(rule.records, g, append([]int{i}, matched...))
+		return out, end, true
 	}
 	return g, i, false
 }
 
 func (s *gsubContext3) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	if len(s.covs) == 0 || !matchCovSeq(g, i, s.covs) {
+	matched, end, ok := a.skip.matchContext(g, i, s.covs)
+	if !ok {
 		return g, i, false
 	}
-	out := a.runRecords(s.records, g, i)
-	return out, i + len(s.covs), true
+	out := a.runRecords(s.records, g, matched)
+	return out, end, true
 }
 
 // --- Type 6: chaining-contextual substitution -------------------------------
@@ -984,14 +994,16 @@ func (s *gsubChain1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, i
 		return g, i, false
 	}
 	for _, rule := range s.sets[ci] {
-		inLen := 1 + len(rule.input)
-		if !matchGlyphSeq(g, i+1, rule.input) ||
-			!matchBacktrackGlyphs(g, i, rule.backtrack) ||
-			!matchGlyphSeq(g, i+inLen, rule.lookahead) {
+		matched, end, ok := a.skip.matchForward(g, i+1, glyphPredsU(rule.input))
+		if !ok ||
+			!a.skip.matchBackward(g, i-1, glyphPredsU(rule.backtrack)) {
 			continue
 		}
-		out := a.runRecords(rule.records, g, i)
-		return out, i + inLen, true
+		if _, _, ok := a.skip.matchForward(g, end, glyphPredsU(rule.lookahead)); !ok {
+			continue
+		}
+		out := a.runRecords(rule.records, g, append([]int{i}, matched...))
+		return out, end, true
 	}
 	return g, i, false
 }
@@ -1005,28 +1017,31 @@ func (s *gsubChain2) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, i
 		return g, i, false
 	}
 	for _, rule := range s.sets[cls] {
-		inLen := 1 + len(rule.input)
-		if !matchClassSeq(g, i+1, rule.input, s.input) ||
-			!matchBacktrackClass(g, i, rule.backtrack, s.backtrack) ||
-			!matchClassSeq(g, i+inLen, rule.lookahead, s.lookahead) {
+		matched, end, ok := a.skip.matchForward(g, i+1, classPredsU(rule.input, s.input))
+		if !ok ||
+			!a.skip.matchBackward(g, i-1, classPredsU(rule.backtrack, s.backtrack)) {
 			continue
 		}
-		out := a.runRecords(rule.records, g, i)
-		return out, i + inLen, true
+		if _, _, ok := a.skip.matchForward(g, end, classPredsU(rule.lookahead, s.lookahead)); !ok {
+			continue
+		}
+		out := a.runRecords(rule.records, g, append([]int{i}, matched...))
+		return out, end, true
 	}
 	return g, i, false
 }
 
 func (s *gsubChain3) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	inLen := len(s.input)
-	if inLen == 0 ||
-		!matchCovSeq(g, i, s.input) ||
-		!matchBacktrackCov(g, i, s.backtrack) ||
-		!matchCovSeq(g, i+inLen, s.lookahead) {
+	matched, end, ok := a.skip.matchContext(g, i, s.input)
+	if !ok ||
+		!a.skip.matchBackward(g, i-1, covPreds(s.backtrack)) {
 		return g, i, false
 	}
-	out := a.runRecords(s.records, g, i)
-	return out, i + inLen, true
+	if _, _, ok := a.skip.matchForward(g, end, covPreds(s.lookahead)); !ok {
+		return g, i, false
+	}
+	out := a.runRecords(s.records, g, matched)
+	return out, end, true
 }
 
 // --- Type 7: extension substitution -----------------------------------------
@@ -1098,12 +1113,15 @@ func parseGSUBReverse(b []byte) (gsubSubtable, error) {
 	return &gsubReverseChain1{cov: cov, backtrack: bt, lookahead: la, subst: subst}, nil
 }
 
-func (s *gsubReverseChain1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
+func (s *gsubReverseChain1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
 	idx, ok := s.cov[g[i]]
 	if !ok || idx >= len(s.subst) {
 		return g, i, false
 	}
-	if !matchBacktrackCov(g, i, s.backtrack) || !matchCovSeq(g, i+1, s.lookahead) {
+	if !a.skip.matchBackward(g, i-1, covPreds(s.backtrack)) {
+		return g, i, false
+	}
+	if _, _, ok := a.skip.matchForward(g, i+1, covPreds(s.lookahead)); !ok {
 		return g, i, false
 	}
 	g[i] = s.subst[idx]
@@ -1126,7 +1144,7 @@ func (g *gsub) Apply(glyphs []GlyphIndex, features ...string) []GlyphIndex {
 		return glyphs
 	}
 	out := append([]GlyphIndex(nil), glyphs...)
-	a := &gsubApplier{lookups: g.lookups}
+	a := &gsubApplier{lookups: g.lookups, gdef: g.gdef}
 	for _, li := range idxs {
 		if li >= len(g.lookups) {
 			continue
@@ -1138,10 +1156,15 @@ func (g *gsub) Apply(glyphs []GlyphIndex, features ...string) []GlyphIndex {
 
 // applyLookup applies one lookup across the run. Reverse-chaining lookups are
 // applied back-to-front; all others left-to-right, taking the first subtable
-// that matches at each position.
+// that matches at each position. A glyph the lookup's flags ignore is not a
+// starting position: it is skipped without attempting any subtable there.
 func (a *gsubApplier) applyLookup(lk gsubLookup, glyphs []GlyphIndex) []GlyphIndex {
+	a.skip = a.skipperFor(lk)
 	if lk.reverse {
 		for i := len(glyphs) - 1; i >= 0; i-- {
+			if a.skip.skip(glyphs[i]) {
+				continue
+			}
 			for _, st := range lk.subtables {
 				if out, _, ok := st.sub(a, glyphs, i); ok {
 					glyphs = out
@@ -1153,6 +1176,10 @@ func (a *gsubApplier) applyLookup(lk gsubLookup, glyphs []GlyphIndex) []GlyphInd
 	}
 	i := 0
 	for i < len(glyphs) {
+		if a.skip.skip(glyphs[i]) {
+			i++
+			continue
+		}
 		applied := false
 		for _, st := range lk.subtables {
 			if out, next, ok := st.sub(a, glyphs, i); ok {

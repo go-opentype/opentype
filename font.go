@@ -45,20 +45,21 @@ type Font struct {
 	mvar             *mvarTable // optional: global font-metric variation
 
 	// OpenType Layout tables, all optional. Absence is not an error.
-	gsub *gsub // glyph substitution (ligatures, single substitution)
-	gpos *gpos // glyph positioning (pair kerning)
-	kern *kern // legacy kern table (kerning fallback)
+	gdef *gdefTable // glyph definitions (classes, mark sets) for lookup flags
+	gsub *gsub      // glyph substitution (ligatures, single substitution)
+	gpos *gpos      // glyph positioning (pair kerning)
+	kern *kern      // legacy kern table (kerning fallback)
 
 	// Vertical writing-mode metrics (vhea/vmtx/VORG), all optional. They enable
 	// top-to-bottom (CJK tategaki) layout; absence means vertical metrics are
 	// unavailable. See vertical.go.
-	vertAscender        int   // vhea vertTypoAscender, font units
-	vertDescender       int   // vhea vertTypoDescender, font units
-	vertLineGap         int   // vhea vertTypoLineGap, font units
-	numOfLongVerMetrics int   // vhea count of full vmtx entries
-	vertAdvances        []int // advanceHeight per glyph, font units (vmtx)
-	tsbs                []int // top side bearing per glyph, font units (vmtx)
-	vorgDefault         int   // VORG defaultVertOriginY, font units
+	vertAscender        int                // vhea vertTypoAscender, font units
+	vertDescender       int                // vhea vertTypoDescender, font units
+	vertLineGap         int                // vhea vertTypoLineGap, font units
+	numOfLongVerMetrics int                // vhea count of full vmtx entries
+	vertAdvances        []int              // advanceHeight per glyph, font units (vmtx)
+	tsbs                []int              // top side bearing per glyph, font units (vmtx)
+	vorgDefault         int                // VORG defaultVertOriginY, font units
 	vorg                map[GlyphIndex]int // VORG per-glyph vertical origin overrides
 	hasVhea             bool
 	hasVmtx             bool
@@ -220,11 +221,21 @@ func Parse(b []byte) (*Font, error) {
 // independent; any subset (or none) may be present, and a malformed table is
 // reported as an error so a corrupt font fails cleanly.
 func (f *Font) parseLayout(tables map[string][]byte) error {
+	// GDEF is parsed first so its glyph classes and mark sets can be shared with
+	// the GSUB and GPOS appliers, which honour it through their lookup flags.
+	if b, ok := tables["GDEF"]; ok {
+		gd, err := parseGDEF(b)
+		if err != nil {
+			return err
+		}
+		f.gdef = gd
+	}
 	if b, ok := tables["GSUB"]; ok {
 		g, err := parseGSUB(b)
 		if err != nil {
 			return err
 		}
+		g.gdef = f.gdef
 		f.gsub = g
 	}
 	if b, ok := tables["GPOS"]; ok {
@@ -232,6 +243,7 @@ func (f *Font) parseLayout(tables map[string][]byte) error {
 		if err != nil {
 			return err
 		}
+		g.gdef = f.gdef
 		f.gpos = g
 	}
 	if b, ok := tables["kern"]; ok {

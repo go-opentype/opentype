@@ -1399,26 +1399,26 @@ func TestApplyLookupBounds(t *testing.T) {
 
 func TestMatchHelpers(t *testing.T) {
 	glyphs := []GlyphIndex{10, 11, 12}
-	if !matchGlyphs(glyphs, 0, []GlyphIndex{10, 11}) {
-		t.Error("matchGlyphs should match")
+	var sk skipper // zero skipper: skips nothing (contiguous walk)
+	// matchForward from i+1 matches the glyphs after position 0.
+	if _, _, ok := sk.matchForward(glyphs, 1, glyphPredsG([]GlyphIndex{11})); !ok {
+		t.Error("matchForward should match")
 	}
-	if matchGlyphs(glyphs, 2, []GlyphIndex{12, 13}) { // runs off the end
-		t.Error("matchGlyphs overrun should fail")
+	if _, _, ok := sk.matchForward(glyphs, 3, glyphPredsG([]GlyphIndex{13})); ok { // off the end
+		t.Error("matchForward overrun should fail")
 	}
-	if matchGlyphs(glyphs, -1, []GlyphIndex{10}) { // negative start
-		t.Error("matchGlyphs negative start should fail")
+	if _, _, ok := sk.matchForward(glyphs, 1, glyphPredsG([]GlyphIndex{99})); ok { // mismatch
+		t.Error("matchForward mismatch should fail")
 	}
-	if matchGlyphs(glyphs, 0, []GlyphIndex{10, 99}) { // value mismatch
-		t.Error("matchGlyphs mismatch should fail")
+	// matchBackward from i-1 matches the glyphs preceding position 2 in reverse.
+	if !sk.matchBackward(glyphs, 1, glyphPredsG([]GlyphIndex{11, 10})) {
+		t.Error("matchBackward should match")
 	}
-	if !matchBacktrack(glyphs, 2, []GlyphIndex{11, 10}) {
-		t.Error("matchBacktrack should match")
+	if sk.matchBackward(glyphs, 0, glyphPredsG([]GlyphIndex{10, 9})) { // off the front
+		t.Error("matchBackward overrun should fail")
 	}
-	if matchBacktrack(glyphs, 1, []GlyphIndex{10, 9}) { // second step off the front
-		t.Error("matchBacktrack overrun should fail")
-	}
-	if matchBacktrack(glyphs, 2, []GlyphIndex{99}) { // value mismatch
-		t.Error("matchBacktrack mismatch should fail")
+	if sk.matchBackward(glyphs, 1, glyphPredsG([]GlyphIndex{99})) { // value mismatch
+		t.Error("matchBackward mismatch should fail")
 	}
 }
 
