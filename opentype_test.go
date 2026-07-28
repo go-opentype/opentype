@@ -356,11 +356,13 @@ func TestParseErrors(t *testing.T) {
 			binary.BigEndian.PutUint32(b, 0xDEADBEEF)
 			return b
 		}, "bad sfnt version"},
-		{"OTTO", func() []byte {
+		{"OTTO without CFF", func() []byte {
+			// An OTTO sfnt with no 'CFF ' table is malformed: it needs CFF
+			// outlines but carries none (and no longer needs glyf/loca).
 			b := stdBytes(false, false)
 			binary.BigEndian.PutUint32(b, versionOTTO)
 			return b
-		}, "CFF/OpenType outlines"},
+		}, `missing required table "CFF "`},
 		{"truncated directory", func() []byte {
 			b := stdBytes(false, false)
 			binary.BigEndian.PutUint16(b[4:], 0xFFFF)
