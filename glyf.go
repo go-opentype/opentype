@@ -45,9 +45,10 @@ const (
 const maxCompositeDepth = 8
 
 // glyphContours returns the outline of glyph gid, resolving composites, with
-// a fresh recursion-tracking state.
+// a fresh recursion-tracking state. It returns the default-master outline; a
+// nil norm disables variation (see loadGlyph).
 func (f *Font) glyphContours(gid GlyphIndex) ([]contour, error) {
-	return f.loadGlyph(gid, 0, map[GlyphIndex]bool{})
+	return f.loadGlyph(gid, 0, map[GlyphIndex]bool{}, nil)
 }
 
 // glyphInstructions returns the TrueType instruction bytecode attached to a
@@ -76,8 +77,12 @@ func (f *Font) glyphInstructions(gid GlyphIndex) []byte {
 }
 
 // loadGlyph decodes glyph gid's contours in font units. depth and visited
-// guard composite recursion against over-deep nesting and cycles.
-func (f *Font) loadGlyph(gid GlyphIndex, depth int, visited map[GlyphIndex]bool) ([]contour, error) {
+// guard composite recursion against over-deep nesting and cycles. norm, when
+// non-nil, is the normalized variation coordinate at which the glyph is
+// instanced: simple-glyph points get their 'gvar' deltas (with IUP) and
+// composite-component offsets get theirs (see gvar.go). A nil norm yields the
+// unvaried default-master outline.
+func (f *Font) loadGlyph(gid GlyphIndex, depth int, visited map[GlyphIndex]bool, norm []int16) ([]contour, error) {
 	if depth > maxCompositeDepth {
 		return nil, errors.New("opentype: composite glyph nesting too deep")
 	}
@@ -104,9 +109,13 @@ func (f *Font) loadGlyph(gid GlyphIndex, depth int, visited map[GlyphIndex]bool)
 	numberOfContours := int(r.i16())
 	r.skip(8) // xMin, yMin, xMax, yMax
 	if numberOfContours >= 0 {
-		return f.simpleGlyph(&r, numberOfContours)
+		contours, err := f.simpleGlyph(&r, numberOfContours)
+		if err != nil {
+			return nil, err
+		}
+		return f.varySimple(int(gid), contours, norm), nil
 	}
-	return f.compositeGlyph(&r, depth, visited)
+	return f.compositeGlyph(int(gid), &r, depth, visited, norm)
 }
 
 // simpleGlyph decodes a simple (non-composite) glyph's n contours.
@@ -180,60 +189,103 @@ func readCoords(r *reader, flags []uint8, numPoints int, shortBit, samePosBit ui
 	return coords
 }
 
-// compositeGlyph assembles a composite glyph from its components, recursively
-// decoding and transforming each referenced glyph.
-func (f *Font) compositeGlyph(r *reader, depth int, visited map[GlyphIndex]bool) ([]contour, error) {
-	var out []contour
+// glyphComponent is one decoded component record of a composite glyph: the
+// referenced glyph, its placement offset (arg1/arg2, when argsAreXY) and its
+// 2x2 transform (a,b,c,d).
+type glyphComponent struct {
+	flags      uint16
+	gid        GlyphIndex
+	arg1, arg2 int
+	a, b, c, d float64
+	argsAreXY  bool
+}
+
+// parseComponents decodes a composite glyph's component records; r must be
+// positioned just past the glyph header. Components are returned in order.
+func parseComponents(r *reader) ([]glyphComponent, error) {
+	var comps []glyphComponent
 	for {
-		flags := r.u16()
-		compGID := r.u16()
-		var arg1, arg2 int
-		if flags&compArgsAreWords != 0 {
-			arg1 = int(r.i16())
-			arg2 = int(r.i16())
+		var comp glyphComponent
+		comp.flags = r.u16()
+		comp.gid = GlyphIndex(r.u16())
+		if comp.flags&compArgsAreWords != 0 {
+			comp.arg1 = int(r.i16())
+			comp.arg2 = int(r.i16())
 		} else {
-			arg1 = int(int8(r.u8()))
-			arg2 = int(int8(r.u8()))
+			comp.arg1 = int(int8(r.u8()))
+			comp.arg2 = int(int8(r.u8()))
 		}
-		if flags&compArgsAreXY == 0 {
-			return nil, errors.New("opentype: unsupported: composite point matching")
-		}
-		a, b, c, d := 1.0, 0.0, 0.0, 1.0
+		comp.argsAreXY = comp.flags&compArgsAreXY != 0
+		comp.a, comp.b, comp.c, comp.d = 1.0, 0.0, 0.0, 1.0
 		switch {
-		case flags&compWeHaveScale != 0:
-			a = r.f2dot14()
-			d = a
-		case flags&compXAndYScale != 0:
-			a = r.f2dot14()
-			d = r.f2dot14()
-		case flags&compTwoByTwo != 0:
-			a = r.f2dot14()
-			b = r.f2dot14()
-			c = r.f2dot14()
-			d = r.f2dot14()
+		case comp.flags&compWeHaveScale != 0:
+			comp.a = r.f2dot14()
+			comp.d = comp.a
+		case comp.flags&compXAndYScale != 0:
+			comp.a = r.f2dot14()
+			comp.d = r.f2dot14()
+		case comp.flags&compTwoByTwo != 0:
+			comp.a = r.f2dot14()
+			comp.b = r.f2dot14()
+			comp.c = r.f2dot14()
+			comp.d = r.f2dot14()
 		}
 		if r.err != nil {
 			return nil, fmt.Errorf("opentype: composite glyph: %w", r.err)
 		}
-		dx, dy := float64(arg1), float64(arg2)
-		sub, err := f.loadGlyph(GlyphIndex(compGID), depth+1, visited)
+		comps = append(comps, comp)
+		if comp.flags&compMoreComponents == 0 {
+			return comps, nil
+		}
+	}
+}
+
+// compositeGlyph assembles a composite glyph from its components, recursively
+// decoding and transforming each referenced glyph. When norm is non-nil the
+// component offsets are first varied by 'gvar' (varyComponentOffsets) and each
+// component is instanced recursively at the same coordinate.
+func (f *Font) compositeGlyph(gid int, r *reader, depth int, visited map[GlyphIndex]bool, norm []int16) ([]contour, error) {
+	comps, err := parseComponents(r)
+	if err != nil {
+		return nil, err
+	}
+	dxs := make([]float64, len(comps))
+	dys := make([]float64, len(comps))
+	for i := range comps {
+		dxs[i] = float64(comps[i].arg1)
+		dys[i] = float64(comps[i].arg2)
+	}
+	f.varyComponentOffsets(gid, comps, dxs, dys, norm)
+
+	var out []contour
+	for i := range comps {
+		comp := comps[i]
+		if !comp.argsAreXY {
+			return nil, errors.New("opentype: unsupported: composite point matching")
+		}
+		sub, err := f.loadGlyph(comp.gid, depth+1, visited, norm)
 		if err != nil {
 			return nil, err
 		}
-		for _, cont := range sub {
-			nc := make(contour, len(cont))
-			for i, pt := range cont {
-				nc[i] = outlinePoint{
-					x:  a*pt.x + c*pt.y + dx,
-					y:  b*pt.x + d*pt.y + dy,
-					on: pt.on,
-				}
-			}
-			out = append(out, nc)
-		}
-		if flags&compMoreComponents == 0 {
-			break
-		}
+		out = append(out, transformContours(sub, comp.a, comp.b, comp.c, comp.d, dxs[i], dys[i])...)
 	}
 	return out, nil
+}
+
+// transformContours applies the affine transform [a b c d] with translation
+// (dx, dy) to every point of cs, returning fresh contours.
+func transformContours(cs []contour, a, b, c, d, dx, dy float64) []contour {
+	out := make([]contour, len(cs))
+	for ci, cont := range cs {
+		nc := make(contour, len(cont))
+		for i, pt := range cont {
+			nc[i] = outlinePoint{
+				x:  a*pt.x + c*pt.y + dx,
+				y:  b*pt.x + d*pt.y + dy,
+				on: pt.on,
+			}
+		}
+		out[ci] = nc
+	}
+	return out
 }
