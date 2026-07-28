@@ -16,9 +16,9 @@ import (
 // default master.
 //
 // The three tables are parsed as optional add-ons: a font without them is a
-// plain static font and is unaffected. Deferred (not implemented here): metric
-// variations (HVAR/VVAR/MVAR), style-attribute variations (STAT) and CFF2
-// outline variations. Only 'glyf' outline variation is supported.
+// plain static font and is unaffected. Metric variations (HVAR/VVAR/MVAR) are
+// implemented separately in metricvar.go; CFF2 outline variation lives in
+// cff2.go. Deferred (not implemented here): style-attribute variations (STAT).
 
 // Axis is one design-variation axis of a variable font, decoded from the
 // 'fvar' table. Min, Default and Max are user-space coordinates (for example

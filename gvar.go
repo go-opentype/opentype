@@ -25,7 +25,8 @@ import "fmt"
 // are carried through delta application (so "all points" and explicit point
 // sets index correctly) but are dropped from the result.
 //
-// Deferred (not implemented here): metric variation via HVAR/VVAR/MVAR.
+// Metric variation via HVAR/VVAR/MVAR (advance widths, advance heights and
+// global font metrics) is implemented separately in metricvar.go.
 
 // gvarTable is the parsed 'gvar' table.
 type gvarTable struct {

@@ -26,7 +26,10 @@ type Face struct {
 
 	// varCoords, when non-nil, instances a variable font's glyf outlines at the
 	// given user-space axis coordinates before rasterising (see SetVariation).
+	// varNorm caches those coordinates normalized (NormalizeCoords) so the
+	// metric-variation tables (HVAR/VVAR/MVAR) can be evaluated per call.
 	varCoords map[string]float64
+	varNorm   []int16
 
 	// hinting enables the TrueType instruction interpreter for glyf glyphs that
 	// carry instructions (see SetHinting). interp is built lazily on first use
@@ -69,24 +72,47 @@ func (fc *Face) Font() *Font { return fc.font }
 // advance or offset by it to obtain whole pixels at the face's size.
 func (fc *Face) Scale() float64 { return fc.scale }
 
-// Metrics returns the face's vertical metrics in pixels.
+// Metrics returns the face's vertical metrics in pixels. When a variation is
+// set and the font carries an MVAR table, the global metric deltas for the
+// ascender ("hasc"), descender ("hdsc") and line gap ("hlgp") are folded in.
 func (fc *Face) Metrics() Metrics {
 	s := fc.scale
+	asc := float64(fc.font.ascender)
+	desc := float64(fc.font.descender)
+	gap := float64(fc.font.lineGap)
+	if fc.varCoords != nil && fc.font.mvar != nil {
+		asc += fc.font.mvar.delta("hasc", fc.varNorm)
+		desc += fc.font.mvar.delta("hdsc", fc.varNorm)
+		gap += fc.font.mvar.delta("hlgp", fc.varNorm)
+	}
 	return Metrics{
-		Ascent:  roundInt(float64(fc.font.ascender) * s),
-		Descent: roundInt(float64(-fc.font.descender) * s),
-		Height:  roundInt(float64(fc.font.ascender-fc.font.descender+fc.font.lineGap) * s),
+		Ascent:  roundInt(asc * s),
+		Descent: roundInt(-desc * s),
+		Height:  roundInt((asc - desc + gap) * s),
 	}
 }
 
+// hAdvanceUnits returns glyph gid's horizontal advance in font units at the
+// face's current variation: the base advance plus, when a variation is set, the
+// HVAR delta (or the gvar phantom-point fallback). With no variation set the
+// result is exactly the base advance.
+func (fc *Face) hAdvanceUnits(gid GlyphIndex) float64 {
+	adv := float64(fc.font.GlyphAdvance(gid))
+	if fc.varCoords != nil {
+		adv += fc.font.horizontalAdvanceDelta(int(gid), fc.varNorm)
+	}
+	return adv
+}
+
 // Advance returns the horizontal advance of r in pixels, or 0 if the rune is
-// not mapped by the font's cmap.
+// not mapped by the font's cmap. When a variation is set the HVAR delta (or the
+// gvar phantom-point fallback) is included.
 func (fc *Face) Advance(r rune) int {
 	gid, ok := fc.font.GlyphIndex(r)
 	if !ok {
 		return 0
 	}
-	return roundInt(float64(fc.font.advances[gid]) * fc.scale)
+	return roundInt(fc.hAdvanceUnits(gid) * fc.scale)
 }
 
 // Measure returns the total advance width of s in pixels (the sum of each
@@ -145,7 +171,7 @@ func (fc *Face) GlyphMask(r rune, x, y int) (bounds image.Rectangle, mask *image
 	if !cg.ok {
 		return image.Rectangle{}, nil, image.Point{}, 0, false
 	}
-	advance = roundInt(float64(fc.font.advances[gid]) * fc.scale)
+	advance = roundInt(fc.hAdvanceUnits(gid) * fc.scale)
 	bounds = cg.bounds.Add(image.Point{X: x, Y: y})
 	return bounds, cg.mask, image.Point{}, advance, true
 }
@@ -171,7 +197,7 @@ func (fc *Face) GlyphMaskIndex(gid GlyphIndex, x, y int) (bounds image.Rectangle
 	if !cg.ok {
 		return image.Rectangle{}, nil, image.Point{}, 0, false
 	}
-	advance = roundInt(float64(fc.font.GlyphAdvance(gid)) * fc.scale)
+	advance = roundInt(fc.hAdvanceUnits(gid) * fc.scale)
 	bounds = cg.bounds.Add(image.Point{X: x, Y: y})
 	return bounds, cg.mask, image.Point{}, advance, true
 }
@@ -219,6 +245,7 @@ func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
 // change takes effect at once.
 func (fc *Face) SetVariation(coords map[string]float64) {
 	fc.varCoords = coords
+	fc.varNorm = fc.font.NormalizeCoords(coords)
 	fc.cache = map[GlyphIndex]cachedGlyph{}
 }
 
