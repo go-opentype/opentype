@@ -130,6 +130,11 @@ these, and `go doc github.com/go-opentype/opentype` for the full reference.
 - CFF and CFF2 (`OTTO`) Type 2 charstring outlines, including `seac`
 - `fvar`/`avar`/`gvar`/`MVAR` and CFF2 blends for variable fonts
 - `GSUB`/`GPOS`/`GDEF`, the legacy `kern` table
+- the OpenType **`MATH`** table — math-typesetting metrics (constants, per-glyph
+  italic correction / top-accent attachment / corner kerning, and stretchy-glyph
+  size variants and assemblies), exposed pixel-scaled through a `Face`
+  (`HasMath`, `MathConstant`, `ItalicCorrection`, `TopAccentAttachment`,
+  `MathKern`, `MathVariants`); math *layout* is left to a higher-level engine
 - TrueType instruction hinting and a CFF stem grid-fitter/darkener
 - `vhea`/`vmtx`/`VORG` vertical metrics
 - anti-aliased rasterisation via 4×4 supersampling under the non-zero
