@@ -159,7 +159,11 @@ func (fc *Face) VerticalAdvance(r rune) int {
 	if !ok {
 		return 0
 	}
-	return roundInt(float64(fc.font.verticalAdvance(gid)) * fc.scale)
+	adv := float64(fc.font.verticalAdvance(gid))
+	if fc.varCoords != nil {
+		adv += fc.font.verticalAdvanceDelta(int(gid), fc.varNorm)
+	}
+	return roundInt(adv * fc.scale)
 }
 
 // VerticalMetrics returns the face's vertical-layout line metrics in pixels: the

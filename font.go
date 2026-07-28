@@ -40,6 +40,9 @@ type Font struct {
 	fvar             *fvarTable // optional: variation axes and named instances
 	avar             *avarTable // optional: axis-value segment maps
 	gvar             *gvarTable // optional: glyph variation (delta) data
+	hvar             *hvarTable // optional: horizontal metrics variation (advances)
+	vvar             *vvarTable // optional: vertical metrics variation (advances)
+	mvar             *mvarTable // optional: global font-metric variation
 
 	// OpenType Layout tables, all optional. Absence is not an error.
 	gsub *gsub // glyph substitution (ligatures, single substitution)
@@ -191,6 +194,12 @@ func Parse(b []byte) (*Font, error) {
 	// renders exactly as before; when present they enable instancing at a
 	// chosen axis coordinate (see fvar.go, avar.go, gvar.go).
 	if err := f.parseVariations(tables); err != nil {
+		return nil, err
+	}
+	// Optional metric-variation tables (HVAR, VVAR, MVAR): advance widths,
+	// advance heights and global font metrics that track the axis coordinate.
+	// Absence is not an error (see metricvar.go).
+	if err := f.parseMetricVariations(tables); err != nil {
 		return nil, err
 	}
 	// Optional OpenType Layout tables: substitution (GSUB), positioning (GPOS)
