@@ -141,12 +141,18 @@ func (fc *Face) GlyphMask(r rune, x, y int) (bounds image.Rectangle, mask *image
 }
 
 // outline returns glyph gid's outline as contours in font units, selecting the
-// outline source (CFF vs glyf), applying variable-font instancing when a
+// outline source (CFF2 vs CFF vs glyf), applying variable-font instancing when a
 // variation is set, and applying hinting when it is enabled.
 //
-// CFF outlines are returned as-is: variation of CFF (CFF2) and CFF hinting are
-// deferred (see cff.go), so SetVariation and SetHinting affect glyf fonts only.
+// A CFF2 font is inherently variable: its outlines are instanced at the face's
+// variation coordinates (the default master when none is set), converted to the
+// normalized F2Dot14 form cff2.outline expects via NormalizeCoords. CFF1
+// outlines are returned as-is (CFF1 has no variation and CFF hinting is
+// deferred, see cff.go), so SetHinting affects glyf fonts only.
 func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
+	if fc.font.cff2 != nil {
+		return fc.font.cff2.outline(int(gid), fc.font.NormalizeCoords(fc.varCoords))
+	}
 	if fc.font.cff != nil {
 		return fc.font.cff.outline(int(gid))
 	}
@@ -170,9 +176,11 @@ func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
 
 // SetVariation instances the font at the user-space axis coordinates coords
 // (keyed by axis tag, e.g. {"wght": 700}); axes absent from coords take their
-// default. Subsequent GlyphMask calls reflect the instanced glyf outlines. Pass
-// nil to return to the default master. A non-variable font (or a CFF font) is
-// unaffected. The glyph cache is invalidated so the change takes effect at once.
+// default. Subsequent GlyphMask calls reflect the instanced outlines, for both
+// glyf (via gvar) and CFF2 (via its blend/vsindex operators) variable fonts.
+// Pass nil to return to the default master. A non-variable font (or a CFF1 font,
+// which has no variation) is unaffected. The glyph cache is invalidated so the
+// change takes effect at once.
 func (fc *Face) SetVariation(coords map[string]float64) {
 	fc.varCoords = coords
 	fc.cache = map[GlyphIndex]cachedGlyph{}
