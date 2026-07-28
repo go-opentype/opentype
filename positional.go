@@ -70,12 +70,50 @@ type FeatureApp struct {
 // script, then the union across every script's default LangSys), so features
 // filed only under a real script such as "arab" or "latn" still resolve. An
 // empty feature list or an empty run leaves the input unchanged.
+//
+// Use [GSUB.ApplyMaskedTracked] instead when the caller must follow which
+// source glyph each output glyph derives from across a decomposition or
+// ligature (as a shaper does to re-derive Arabic joining masks after ccmp
+// decomposes letters, and to map output glyphs back to text clusters).
 func (g *gsub) ApplyMasked(glyphs []GlyphIndex, feats []FeatureApp) []GlyphIndex {
+	out, _ := g.applyMasked(glyphs, nil, feats)
+	return out
+}
+
+// ApplyMaskedTracked is [GSUB.ApplyMasked] that also propagates a per-glyph
+// cluster (source-position) slice through the substitution. clusters gives the
+// starting cluster of each input glyph; nil starts them at 0, 1, 2, ... The
+// returned cluster slice is the same length as the returned run: a glyph
+// produced by decomposing input glyph k carries cluster[k], and a ligature
+// carries the cluster of its first component. Neither input slice is modified.
+//
+// This is the primitive a complex-text shaper drives: apply ccmp with tracking
+// to learn where each decomposed glyph came from, rebuild the init/medi/fina
+// masks against the decomposed run, apply those, and read the final clusters to
+// map glyphs back to the source text.
+func (g *gsub) ApplyMaskedTracked(glyphs []GlyphIndex, clusters []int, feats []FeatureApp) ([]GlyphIndex, []int) {
+	if clusters == nil {
+		clusters = make([]int, len(glyphs))
+		for i := range clusters {
+			clusters[i] = i
+		}
+	}
+	return g.applyMasked(glyphs, clusters, feats)
+}
+
+// applyMasked is the shared implementation of ApplyMasked and
+// ApplyMaskedTracked. A nil clusters disables cluster tracking (the plain
+// ApplyMasked fast path); a non-nil clusters is threaded through the applier
+// and returned alongside the substituted run.
+func (g *gsub) applyMasked(glyphs []GlyphIndex, clusters []int, feats []FeatureApp) ([]GlyphIndex, []int) {
 	if len(feats) == 0 || len(glyphs) == 0 {
-		return glyphs
+		return glyphs, clusters
 	}
 	out := append([]GlyphIndex(nil), glyphs...)
 	a := &gsubApplier{lookups: g.lookups}
+	if clusters != nil {
+		a.clusters = append([]int(nil), clusters...)
+	}
 	for _, fa := range feats {
 		idxs := g.selectLookupsDefault(map[string]bool{fa.Tag: true})
 		for _, li := range idxs {
@@ -85,7 +123,7 @@ func (g *gsub) ApplyMasked(glyphs []GlyphIndex, feats []FeatureApp) []GlyphIndex
 			out = a.applyLookupMasked(g.lookups[li], out, fa.Positions)
 		}
 	}
-	return out
+	return out, a.clusters
 }
 
 // applyLookupMasked applies one lookup like applyLookup, but restricted to the
