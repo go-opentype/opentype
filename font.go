@@ -34,7 +34,10 @@ type Font struct {
 	loca             []uint32
 	glyf             []byte
 	cmap             cmapLookup
-	cmapVS           *cmap14 // format-14 Unicode Variation Sequences subtable, if present
+	cmapVS           *cmap14    // format-14 Unicode Variation Sequences subtable, if present
+	fvar             *fvarTable // optional: variation axes and named instances
+	avar             *avarTable // optional: axis-value segment maps
+	gvar             *gvarTable // optional: glyph variation (delta) data
 
 	// TrueType instruction (hinting) tables and limits. These are optional:
 	// a font without them simply cannot be hinted. See hint.go.
@@ -131,6 +134,12 @@ func Parse(b []byte) (*Font, error) {
 	f.fpgm = tables["fpgm"]
 	f.prep = tables["prep"]
 	f.parseCvt(tables["cvt "])
+	// Optional OpenType Font Variations tables. A font without them parses and
+	// renders exactly as before; when present they enable instancing at a
+	// chosen axis coordinate (see fvar.go, avar.go, gvar.go).
+	if err := f.parseVariations(tables); err != nil {
+		return nil, err
+	}
 	return f, nil
 }
 
