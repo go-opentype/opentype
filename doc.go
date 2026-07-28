@@ -35,4 +35,17 @@
 //
 // A Font is immutable after Parse and safe for concurrent use; a Face caches
 // rasterised glyphs and is not safe for concurrent use.
+//
+// # Embedding and subsetting
+//
+// For a consumer that embeds a font (a PDF or EPUB writer), the package exposes
+// the primitives such an embedder otherwise re-implements by re-parsing the sfnt:
+// the PDF FontDescriptor scalars ([Font.UnitsPerEm], [Font.FontBBox],
+// [Font.CapHeight], [Font.XHeight], [Font.ItalicAngle], [Font.StemV],
+// [Font.Flags], ...); raw table access ([Font.TableTags], [Font.Table]);
+// by-glyph-index advances that honour the current variation
+// ([Face.AdvanceIndex], [Face.AdvanceIndexUnits], [Face.VerticalAdvanceIndex]);
+// TrueType glyph subsetting ([Font.SubsetTrueType]) and CFF charstring subsetting
+// ([Font.SubsetCFF]); and baking a variable font at a chosen axis position into a
+// static instance ([Font.Instance], [Font.InstanceBytes]).
 package opentype
