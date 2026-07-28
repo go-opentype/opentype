@@ -413,6 +413,46 @@ func cmap6Bytes(firstCode uint16, glyphIDArray []uint16) []byte {
 	return w.bytes()
 }
 
+// cmap10Bytes builds a format-10 cmap subtable covering the contiguous range
+// [startCharCode, startCharCode+len(glyphIDArray)) — the 32-bit analogue of
+// cmap6Bytes.
+func cmap10Bytes(startCharCode uint32, glyphIDArray []uint16) []byte {
+	w := &bw{}
+	w.u16(10) // format
+	w.u16(0)  // reserved
+	w.u32(0)  // length (unused by parser)
+	w.u32(0)  // language
+	w.u32(startCharCode)
+	w.u32(uint32(len(glyphIDArray)))
+	for _, g := range glyphIDArray {
+		w.u16(g)
+	}
+	return w.bytes()
+}
+
+// cmap8Bytes builds a format-8 (mixed 16/32-bit coverage) cmap subtable from
+// explicit {startCharCode, endCharCode, startGlyphID} groups. is32 is left
+// zeroed throughout: the parser stores it for spec fidelity but lookup never
+// consults it, so its content is irrelevant to every test that uses this
+// builder.
+func cmap8Bytes(groups [][3]uint32) []byte {
+	w := &bw{}
+	w.u16(8) // format
+	w.u16(0) // reserved
+	w.u32(0) // length (unused by parser)
+	w.u32(0) // language
+	for i := 0; i < 8192; i++ {
+		w.u8(0) // is32 bitmap
+	}
+	w.u32(uint32(len(groups)))
+	for _, g := range groups {
+		w.u32(g[0]) // startCharCode
+		w.u32(g[1]) // endCharCode
+		w.u32(g[2]) // startGlyphID
+	}
+	return w.bytes()
+}
+
 // cmap2SubHeaderSpec describes one subHeader for the format-2 builder.
 type cmap2SubHeaderSpec struct {
 	firstCode, entryCount uint16
