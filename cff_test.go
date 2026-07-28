@@ -489,9 +489,10 @@ type cffOptions struct {
 	gsubrs      [][]byte
 	lsubrs      [][]byte
 	includePriv bool
-	charType    int   // 0 -> omit CharstringType operator
-	omitCharStr bool  // omit the CharStrings operator entirely
-	charsetSIDs []int // when non-nil, emit a format-0 charset (SID per glyph 1..n-1)
+	charType    int    // 0 -> omit CharstringType operator
+	omitCharStr bool   // omit the CharStrings operator entirely
+	charsetSIDs []int  // when non-nil, emit a format-0 charset (SID per glyph 1..n-1)
+	privExtra   []byte // extra Private-DICT bytes (hint params) placed before Subrs
 }
 
 // cffCharset0 encodes a format-0 charset: one uint16 string id per glyph 1..n-1
@@ -518,8 +519,13 @@ func buildCFF(o cffOptions) []byte {
 
 	var privDict, lsubrIdx []byte
 	if o.includePriv {
-		// Private DICT declares its Local Subrs at offset len(privDict)==6.
-		privDict = append(dictLong(6), dictOperator(19)...)
+		// Any hint params come first; the Subrs operator (offset relative to the
+		// Private DICT start) then points just past the whole Private DICT, where
+		// the Local Subr INDEX is laid out. dictLong+operator is 6 bytes.
+		subrOff := len(o.privExtra) + 6
+		privDict = append(privDict, o.privExtra...)
+		privDict = append(privDict, dictLong(subrOff)...)
+		privDict = append(privDict, dictOperator(19)...)
 		lsubrIdx = cffIndex(o.lsubrs)
 	}
 	var charsetData []byte
@@ -743,19 +749,19 @@ func TestParseLocalSubrsErrors(t *testing.T) {
 	data := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 	// Private entry with a single operand -> "bad Private DICT entry".
-	if _, err := parseLocalSubrs(data, map[int][]float64{18: {4}}); err == nil {
+	if _, _, err := parseLocalSubrs(data, map[int][]float64{18: {4}}); err == nil {
 		t.Fatal("expected bad-private-entry error")
 	}
 	// Private DICT out of range.
-	if _, err := parseLocalSubrs(data, map[int][]float64{18: {100, 100}}); err == nil {
+	if _, _, err := parseLocalSubrs(data, map[int][]float64{18: {100, 100}}); err == nil {
 		t.Fatal("expected private-out-of-range error")
 	}
 	// No Private DICT at all -> nil, nil.
-	if ls, err := parseLocalSubrs(data, map[int][]float64{}); err != nil || ls != nil {
+	if ls, _, err := parseLocalSubrs(data, map[int][]float64{}); err != nil || ls != nil {
 		t.Fatalf("no private: %v %v", ls, err)
 	}
 	// Private DICT present but empty (no Subrs operator) -> nil, nil.
-	if ls, err := parseLocalSubrs(data, map[int][]float64{18: {0, 0}}); err != nil || ls != nil {
+	if ls, _, err := parseLocalSubrs(data, map[int][]float64{18: {0, 0}}); err != nil || ls != nil {
 		t.Fatalf("private without subrs: %v %v", ls, err)
 	}
 }
@@ -793,7 +799,7 @@ func TestParseLocalSubrsPrivParseError(t *testing.T) {
 	data := make([]byte, 16)
 	data[0] = 12 // at offset 0, size 1 -> parseDict sees a lone escape byte
 	top := map[int][]float64{18: {1, 0}}
-	if _, err := parseLocalSubrs(data, top); err == nil {
+	if _, _, err := parseLocalSubrs(data, top); err == nil {
 		t.Fatal("expected private dict parse error")
 	}
 }
@@ -804,7 +810,7 @@ func TestParseLocalSubrsSubrOffsetOutOfRange(t *testing.T) {
 	data := make([]byte, len(priv))
 	copy(data, priv)
 	top := map[int][]float64{18: {float64(len(priv)), 0}}
-	if _, err := parseLocalSubrs(data, top); err == nil {
+	if _, _, err := parseLocalSubrs(data, top); err == nil {
 		t.Fatal("expected subr offset out of range error")
 	}
 }

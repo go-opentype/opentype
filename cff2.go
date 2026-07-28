@@ -26,11 +26,13 @@ import "fmt"
 //   - The Private DICT and its Local Subrs live per Font DICT in the FDArray,
 //     selected per glyph by FDSelect.
 //
-// Deferred (not implemented here, matching cff.go's scope): CFF2 hinting is a
-// no-op — hstem/vstem/hintmask are parsed and their bytes skipped but no grid
-// fitting is applied; FDSelect format 4 (for >65535 glyphs) and non-format-1
-// ItemVariationStores are rejected; metric variation (HVAR and friends) is out
-// of scope. The interpreter's operand stack limit follows the CFF2 maximum.
+// CFF2 hinting is supported: hstem/vstem/hintmask stems and each Font DICT's
+// Private-DICT hint parameters are recorded here and grid-fitted by cffhint.go
+// exactly as for CFF1, so Face.SetHinting(true) grid-fits CFF2 glyphs too.
+// Deferred (not implemented here, matching cff.go's scope): FDSelect format 4
+// (for >65535 glyphs) and non-format-1 ItemVariationStores are rejected; metric
+// variation (HVAR and friends) is out of scope. The interpreter's operand stack
+// limit follows the CFF2 maximum.
 
 // maxCFF2Stack is the CFF2 charstring operand-stack limit (the spec permits 513
 // entries; blend expands the stack well past the Type2 limit of 48).
@@ -44,10 +46,11 @@ type cff2Table struct {
 	charStrings [][]byte
 	globalSubrs [][]byte
 	gsubrBias   int
-	fdSelect    []int      // gid -> Font DICT index; nil means every glyph uses 0
-	localSubrs  [][][]byte // per Font DICT: its Local Subr INDEX
-	localBias   []int      // per Font DICT: its Local Subr bias
-	privVsindex []int      // per Font DICT: default vsindex from the Private DICT
+	fdSelect    []int         // gid -> Font DICT index; nil means every glyph uses 0
+	localSubrs  [][][]byte    // per Font DICT: its Local Subr INDEX
+	localBias   []int         // per Font DICT: its Local Subr bias
+	privVsindex []int         // per Font DICT: default vsindex from the Private DICT
+	privHints   []*cffPrivate // per Font DICT: parsed Private-DICT hint parameters
 	vstore      *itemVarStore
 }
 
@@ -193,7 +196,7 @@ func parseCFF2(data []byte) (*cff2Table, error) {
 		}
 	}
 
-	localSubrs, localBias, privVsindex, err := parseCFF2FDArray(data, top)
+	localSubrs, localBias, privVsindex, privHints, err := parseCFF2FDArray(data, top)
 	if err != nil {
 		return nil, err
 	}
@@ -210,6 +213,7 @@ func parseCFF2(data []byte) (*cff2Table, error) {
 		localSubrs:  localSubrs,
 		localBias:   localBias,
 		privVsindex: privVsindex,
+		privHints:   privHints,
 		vstore:      vstore,
 	}, nil
 }
@@ -300,75 +304,79 @@ func (vs *itemVarStore) regionScalar(ri int, coords []float64) float64 {
 // DICT's Private DICT, returning the per-Font-DICT Local Subr INDEXes, their
 // biases and their default vsindex values. A CFF2 table without an FDArray is
 // treated as having a single Font DICT with no Local Subrs.
-func parseCFF2FDArray(data []byte, top map[int][]float64) (subrs [][][]byte, bias, vsindex []int, err error) {
+func parseCFF2FDArray(data []byte, top map[int][]float64) (subrs [][][]byte, bias, vsindex []int, hints []*cffPrivate, err error) {
 	off, ok := dictInt(top, 1236, 0)
 	if !ok {
-		return [][][]byte{nil}, []int{subrBias(0)}, []int{0}, nil
+		return [][][]byte{nil}, []int{subrBias(0)}, []int{0}, []*cffPrivate{nil}, nil
 	}
 	if off < 0 || off > len(data) {
-		return nil, nil, nil, fmt.Errorf("opentype: cff2: FDArray offset out of range")
+		return nil, nil, nil, nil, fmt.Errorf("opentype: cff2: FDArray offset out of range")
 	}
 	fontDicts, err := parseIndex2(&reader{b: data, pos: off})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if len(fontDicts) == 0 {
-		return nil, nil, nil, fmt.Errorf("opentype: cff2: empty FDArray")
+		return nil, nil, nil, nil, fmt.Errorf("opentype: cff2: empty FDArray")
 	}
 	subrs = make([][][]byte, len(fontDicts))
 	bias = make([]int, len(fontDicts))
 	vsindex = make([]int, len(fontDicts))
+	hints = make([]*cffPrivate, len(fontDicts))
 	for i, fd := range fontDicts {
 		d, err := parseDict2(fd)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		ls, vs, err := parseCFF2Private(data, d)
+		ls, vs, h, err := parseCFF2Private(data, d)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		subrs[i] = ls
 		bias[i] = subrBias(len(ls))
 		vsindex[i] = vs
+		hints[i] = h
 	}
-	return subrs, bias, vsindex, nil
+	return subrs, bias, vsindex, hints, nil
 }
 
 // parseCFF2Private resolves a Font DICT's Private DICT and, if present, its
-// Local Subr INDEX and default vsindex.
-func parseCFF2Private(data []byte, fd map[int][]float64) ([][]byte, int, error) {
+// Local Subr INDEX and default vsindex, and parses its hint parameters (blue
+// zones, standard/snap stem widths) for the grid-fitter (cffhint.go).
+func parseCFF2Private(data []byte, fd map[int][]float64) ([][]byte, int, *cffPrivate, error) {
 	pv, ok := fd[18]
 	if !ok {
-		return nil, 0, nil
+		return nil, 0, nil, nil
 	}
 	if len(pv) < 2 {
-		return nil, 0, fmt.Errorf("opentype: cff2: bad Private DICT entry")
+		return nil, 0, nil, fmt.Errorf("opentype: cff2: bad Private DICT entry")
 	}
 	psize, poff := int(pv[0]), int(pv[1])
 	if psize < 0 || poff < 0 || poff+psize > len(data) {
-		return nil, 0, fmt.Errorf("opentype: cff2: Private DICT out of range")
+		return nil, 0, nil, fmt.Errorf("opentype: cff2: Private DICT out of range")
 	}
 	priv, err := parseDict2(data[poff : poff+psize])
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
+	hints := parsePrivateHints(priv)
 	vsindex := 0
 	if v, ok := dictInt(priv, 22, 0); ok {
 		vsindex = v
 	}
 	soff, ok := dictInt(priv, 19, 0)
 	if !ok {
-		return nil, vsindex, nil
+		return nil, vsindex, hints, nil
 	}
 	soff += poff
 	if soff < 0 || soff > len(data) {
-		return nil, 0, fmt.Errorf("opentype: cff2: Local Subrs offset out of range")
+		return nil, 0, nil, fmt.Errorf("opentype: cff2: Local Subrs offset out of range")
 	}
 	ls, err := parseIndex2(&reader{b: data, pos: soff})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
-	return ls, vsindex, nil
+	return ls, vsindex, hints, nil
 }
 
 // parseCFF2FDSelect decodes the FDSelect (glyph -> Font DICT index) in format 0
@@ -447,8 +455,16 @@ type cff2machine struct {
 // result is the instanced outline as contours in font units, all points
 // on-curve with cubics pre-flattened.
 func (c *cff2Table) outline(gid int, coords []int16) ([]contour, error) {
+	cs, _, err := c.outlineHints(gid, coords)
+	return cs, err
+}
+
+// outlineHints is outline plus the hinting data (recorded stems, per-hintmask
+// activation and the glyph's Font-DICT Private-DICT hint parameters) that
+// cffhint.go's grid-fitter consumes. The outline is still instanced at coords.
+func (c *cff2Table) outlineHints(gid int, coords []int16) ([]contour, *cffGlyphHints, error) {
 	if gid < 0 || gid >= len(c.charStrings) {
-		return nil, fmt.Errorf("opentype: cff2 glyph %d out of range", gid)
+		return nil, nil, fmt.Errorf("opentype: cff2 glyph %d out of range", gid)
 	}
 	fd := 0
 	if c.fdSelect != nil {
@@ -470,13 +486,14 @@ func (c *cff2Table) outline(gid int, coords []int16) ([]contour, error) {
 		m.coords[a] = float64(coords[a]) / 16384.0
 	}
 	if err := m.computeBV(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := m.run(c.charStrings[gid], 0); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	m.tm.finishContour()
-	return m.tm.contours, nil
+	gh := &cffGlyphHints{stems: m.tm.stemHints, hintMasks: m.tm.hintMasks, priv: c.privHints[fd]}
+	return m.tm.contours, gh, nil
 }
 
 // computeBV rebuilds the blend vector for the active vsindex: a leading 1 (the
@@ -547,17 +564,15 @@ func (m *cff2machine) run(code []byte, depth int) error {
 func (m *cff2machine) operator(b0 byte, code []byte, i, depth int) (int, bool, error) {
 	tm := m.tm
 	switch b0 {
-	case 1, 3, 18, 23: // hstem, vstem, hstemhm, vstemhm (hints: counted only)
-		tm.nStems += len(tm.stack) / 2
-		tm.stack = tm.stack[:0]
-	case 19, 20: // hintmask, cntrmask (mask bytes skipped)
-		tm.nStems += len(tm.stack) / 2
-		tm.stack = tm.stack[:0]
-		nb := (tm.nStems + 7) / 8
-		if i+nb > len(code) {
-			return i, false, fmt.Errorf("opentype: cff2 charstring: %w", errTruncated)
+	case 1, 3, 18, 23: // hstem, vstem, hstemhm, vstemhm
+		tm.recordStems(b0 == 1 || b0 == 18)
+	case 19, 20: // hintmask, cntrmask
+		tm.recordStems(false) // any operands here are implicit vstem hints
+		ni, herr := tm.readHintMask(code, i, b0 == 19)
+		if herr != nil {
+			return i, false, herr
 		}
-		i += nb
+		i = ni
 	case 21: // rmoveto
 		if len(tm.stack) < 2 {
 			return i, false, fmt.Errorf("opentype: cff2: rmoveto needs 2 args")
