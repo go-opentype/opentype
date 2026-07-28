@@ -37,6 +37,13 @@ type Face struct {
 	hinting     bool
 	interp      *interp
 	interpReady bool
+
+	// stemDarken enables CFF/CFF2 stem darkening (weight compensation) when
+	// hinting is on: stems are embiggened by a small ppem-dependent amount to
+	// improve contrast on the anti-aliased rasteriser at small sizes (see
+	// SetStemDarkening). Off by default, so the default hinted output is
+	// byte-identical to the undarkened result.
+	stemDarken bool
 }
 
 // cachedGlyph is a rasterised glyph held in the Face cache. ok is false when
@@ -219,7 +226,7 @@ func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
 			return nil, err
 		}
 		if fc.hinting {
-			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx))
+			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx), fc.stemDarken)
 		}
 		return contours, nil
 	}
@@ -229,7 +236,7 @@ func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
 			return nil, err
 		}
 		if fc.hinting {
-			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx))
+			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx), fc.stemDarken)
 		}
 		return contours, nil
 	}
@@ -271,6 +278,19 @@ func (fc *Face) SetVariation(coords map[string]float64) {
 // unhinted anti-aliased coverage). The glyph cache is invalidated.
 func (fc *Face) SetHinting(on bool) {
 	fc.hinting = on
+	fc.cache = map[GlyphIndex]cachedGlyph{}
+}
+
+// SetStemDarkening enables or disables stem darkening (weight compensation) for
+// CFF/CFF2 glyphs. When both hinting and darkening are on, every grid-fitted stem
+// is embiggened by a small ppem-dependent amount (strongest at small sizes,
+// fading to none at larger sizes) so stems keep enough contrast on the
+// anti-aliased rasteriser at small text sizes, as FreeType's CFF engine does by
+// default. It has no effect while hinting is off or on glyf (TrueType) outlines.
+// Darkening is off by default, so the default hinted output is byte-identical to
+// the undarkened result. The glyph cache is invalidated.
+func (fc *Face) SetStemDarkening(on bool) {
+	fc.stemDarken = on
 	fc.cache = map[GlyphIndex]cachedGlyph{}
 }
 

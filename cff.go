@@ -404,9 +404,12 @@ type t2machine struct {
 
 	// Hinting data recorded during interpretation for the grid-fitter (cffhint.go):
 	// the resolved stem-edge positions in font units (in declaration order, which
-	// is the order hintmask/cntrmask bits index) and the per-hintmask activation.
-	stemHints []cffStemHint
-	hintMasks []cffHintMask
+	// is the order hintmask/cntrmask bits index), the per-hintmask activation, the
+	// counter-control (cntrmask) stem groups, and the flex-region point ranges.
+	stemHints  []cffStemHint
+	hintMasks  []cffHintMask
+	cntrGroups [][]int
+	flexRanges []flexRange
 }
 
 // outline interprets glyph gid's Type2 charstring into its outline as a set of
@@ -449,7 +452,13 @@ func (c *cffTable) outlineHints(gid int) ([]contour, *cffGlyphHints, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return m.contours, &cffGlyphHints{stems: m.stemHints, hintMasks: m.hintMasks, priv: c.priv}, nil
+	return m.contours, &cffGlyphHints{
+		stems:      m.stemHints,
+		hintMasks:  m.hintMasks,
+		cntrGroups: m.cntrGroups,
+		flexRanges: m.flexRanges,
+		priv:       c.priv,
+	}, nil
 }
 
 // push appends v to the operand stack, guarding the stack-depth limit.
@@ -707,22 +716,31 @@ func (m *t2machine) recordStems(horizontal bool) {
 // (one bit per declared stem, high bit first) and returns the stream index just
 // past them. When record is true (a hintmask, operator 19) the activated stem
 // set is captured together with the point count reached so far, so the
-// grid-fitter can apply each subpath's active hints; a cntrmask (operator 20)
-// passes record false — its counter-control groups are parsed but not applied
-// (see cffhint.go).
+// grid-fitter can apply the hints active at each point (including a mask that
+// changes mid-subpath). A cntrmask (operator 20, record false) records the set
+// of stems it selects as one counter-control group, whose counters (the gaps
+// between the group's stems) the grid-fitter equalises (see cffhint.go).
 func (m *t2machine) readHintMask(code []byte, i int, record bool) (int, error) {
 	nb := (m.nStems + 7) / 8
 	if i+nb > len(code) {
 		return i, fmt.Errorf("opentype: cff hintmask: %w", errTruncated)
 	}
+	active := make([]bool, m.nStems)
+	for k := 0; k < m.nStems; k++ {
+		if code[i+k/8]&(0x80>>(uint(k)%8)) != 0 {
+			active[k] = true
+		}
+	}
 	if record {
-		active := make([]bool, m.nStems)
-		for k := 0; k < m.nStems; k++ {
-			if code[i+k/8]&(0x80>>(uint(k)%8)) != 0 {
-				active[k] = true
+		m.hintMasks = append(m.hintMasks, cffHintMask{pointIndex: m.pointCount(), active: active})
+	} else {
+		var group []int
+		for k, on := range active {
+			if on {
+				group = append(group, k)
 			}
 		}
-		m.hintMasks = append(m.hintMasks, cffHintMask{pointIndex: m.pointCount(), active: active})
+		m.cntrGroups = append(m.cntrGroups, group)
 	}
 	return i + nb, nil
 }
@@ -755,9 +773,13 @@ func (m *t2machine) callSubr(subrs [][]byte, bias, depth, i int) (bool, int, err
 	return m.done, i, nil
 }
 
-// escape executes a two-byte (escape) operator: the flex family.
+// escape executes a two-byte (escape) operator: the flex family. Every flex
+// variant draws two shallow cubic curves; the point range they emit is recorded
+// as a flexRange so the grid-fitter can keep the flex smooth instead of snapping
+// its near-flat span to a stem edge (see cffhint.go).
 func (m *t2machine) escape(b1 byte) error {
 	s := m.stack
+	startIdx := m.pointCount()
 	switch b1 {
 	case 34: // hflex: dx1 dx2 dy2 dx3 dx4 dx5 dx6
 		if len(s) < 7 {
@@ -819,6 +841,7 @@ func (m *t2machine) escape(b1 byte) error {
 	default:
 		return fmt.Errorf("opentype: cff: unknown escape operator %d", b1)
 	}
+	m.flexRanges = append(m.flexRanges, flexRange{start: startIdx, end: m.pointCount() - 1})
 	m.clear()
 	return nil
 }

@@ -39,14 +39,22 @@ import (
 // StdHW, StdVW, StemSnapH, StemSnapV); top/bottom blue-zone construction with
 // overshoot, family-blue substitution and the BlueScale overshoot-suppression
 // rule; stem-width snapping and edge grid-fitting; blue-zone alignment of stem
-// edges and reference points; and per-subpath hintmask hint selection.
+// edges and reference points; and per-point hintmask hint selection.
 //
-// Genuinely deferred sub-nuances (documented, not applied): counter-control
-// (cntrmask) hint groups are parsed but their counters are not equalised;
-// flex-region hints get no special treatment (flex curves are already flattened
-// by the interpreter and follow the ordinary interpolation); a hintmask that
-// changes mid-subpath is applied using the mask in effect at the subpath's
-// first point; and stem-darkening (weight compensation) is not performed.
+// The finer FreeType sub-nuances are also applied here:
+//   - counter control: a cntrmask hint group's counters (the gaps between the
+//     group's same-orientation stems, e.g. the three verticals of 'm') are
+//     equalised after grid-fitting so the stems keep even spacing;
+//   - mid-subpath hintmask changes: each point is remapped through the control
+//     map built from the stems active at that point (not the subpath's first
+//     point), so a mask that switches mid-contour hints each portion correctly;
+//   - flex regions: the near-flat span a flex (flex/flex1/hflex/hflex1) draws is
+//     interpolated smoothly between its grid-fitted anchors instead of letting an
+//     interior point snap to a stem edge as though it were a straight stem;
+//   - stem darkening: an optional ppem-dependent emboldening of stem edges that
+//     improves contrast on the anti-aliased rasteriser at small sizes (off by
+//     default, toggled by Face.SetStemDarkening; the output is byte-identical to
+//     the undarkened result when it is off).
 
 // cffStemHint is one resolved stem hint in font units: the two edge positions
 // (min < max) and whether it is a horizontal stem (hstem, edges are Y
@@ -65,27 +73,51 @@ type cffHintMask struct {
 	active     []bool
 }
 
-// cffGlyphHints bundles a glyph's recorded stems and hintmask activations with
-// the font's parsed Private-DICT hint parameters, as returned by the CFF/CFF2
+// flexRange is one flex region's outline-point span (inclusive global point
+// indices of the points the two flex curves emitted). The point at start-1 is
+// the flex's entry anchor and the point at end is its exit anchor; the interior
+// points between them are interpolated smoothly by the grid-fitter.
+type flexRange struct {
+	start, end int
+}
+
+// cffGlyphHints bundles a glyph's recorded stems, hintmask activations,
+// counter-control (cntrmask) stem groups and flex-region point spans with the
+// font's parsed Private-DICT hint parameters, as returned by the CFF/CFF2
 // interpreters alongside the outline.
 type cffGlyphHints struct {
-	stems     []cffStemHint
-	hintMasks []cffHintMask
-	priv      *cffPrivate
+	stems      []cffStemHint
+	hintMasks  []cffHintMask
+	cntrGroups [][]int
+	flexRanges []flexRange
+	priv       *cffPrivate
+}
+
+// maskSelAt returns the index into hintMasks of the hintmask in force at the
+// given outline-point index — the last hintmask whose pointIndex does not exceed
+// it — or -1 when none applies yet (every stem is then treated as active). It is
+// the primitive the grid-fitter keys its per-point control maps on so a hintmask
+// that changes mid-subpath selects the right stems at each point.
+func (gh *cffGlyphHints) maskSelAt(pointIndex int) int {
+	sel := -1
+	for i, hm := range gh.hintMasks {
+		if hm.pointIndex <= pointIndex {
+			sel = i
+		}
+	}
+	return sel
 }
 
 // activeMaskAt returns the per-stem activation of the hintmask in force at the
-// given outline-point index — the last hintmask whose pointIndex does not
-// exceed it. A nil result means "all stems active" (no hintmask applies yet, or
-// the glyph declared none), which the grid-fitter treats as every stem on.
+// given outline-point index. A nil result means "all stems active" (no hintmask
+// applies yet, or the glyph declared none), which the grid-fitter treats as
+// every stem on.
 func (gh *cffGlyphHints) activeMaskAt(pointIndex int) []bool {
-	var active []bool
-	for _, hm := range gh.hintMasks {
-		if hm.pointIndex <= pointIndex {
-			active = hm.active
-		}
+	sel := gh.maskSelAt(pointIndex)
+	if sel < 0 {
+		return nil
 	}
-	return active
+	return gh.hintMasks[sel].active
 }
 
 // cffPrivate holds the Private-DICT hint parameters that drive grid-fitting.
@@ -398,12 +430,19 @@ func (cm *controlMap) remap(v float64) float64 {
 	return ha + t*(hb-ha)
 }
 
+// hintPoint holds one outline point through grid-fitting: its original scaled
+// (device) position (ox, oy), its hinted position (hx, hy) and its on-curve flag.
+type hintPoint struct {
+	ox, oy, hx, hy float64
+	on             bool
+}
+
 // cffGridFit grid-fits contours (in font units) using the recorded stems and
 // Private-DICT hint parameters, returning the hinted contours in font units.
-// scale is font-units-to-pixels and ppem is pixels/em (the BlueScale rule). It
-// is a no-op returning equivalent geometry when there are no stems and no blue
-// zones.
-func cffGridFit(contours []contour, gh *cffGlyphHints, scale, ppem float64) []contour {
+// scale is font-units-to-pixels and ppem is pixels/em (the BlueScale rule);
+// darken enables stem darkening (weight compensation). It is a no-op returning
+// equivalent geometry when there are no stems and no blue zones.
+func cffGridFit(contours []contour, gh *cffGlyphHints, scale, ppem float64, darken bool) []contour {
 	priv := gh.priv
 	if priv == nil {
 		priv = &cffPrivate{blueScale: defaultBlueScale, blueShift: defaultBlueShift, blueFuzz: defaultBlueFuzz}
@@ -411,27 +450,167 @@ func cffGridFit(contours []contour, gh *cffGlyphHints, scale, ppem float64) []co
 	suppress := ppem*priv.blueScale < 1
 	blues := buildBlueZones(priv, scale)
 
-	// Grid-fit every stem once (its hinted position is independent of subpath).
+	// Grid-fit every stem once (its hinted position is independent of subpath),
+	// then equalise counter-group counters and optionally darken the stems.
 	hs := make([]hintedStem, len(gh.stems))
 	for i, s := range gh.stems {
 		hs[i] = hintStem(s, scale, priv, blues, suppress)
 	}
+	applyCounterControl(hs, gh.stems, gh.cntrGroups)
+	if darken {
+		darkenStems(hs, stemDarkenPixels(ppem))
+	}
+
+	// Remap every point through the control map built from the stems active at
+	// that point (per-point so a mid-subpath hintmask change hints correctly). The
+	// maps for a given active-hintmask selection are built once and cached.
+	cache := map[int]axisMaps{}
+	getMaps := func(sel int) axisMaps {
+		if m, ok := cache[sel]; ok {
+			return m
+		}
+		var active []bool
+		if sel >= 0 {
+			active = gh.hintMasks[sel].active
+		}
+		x, y := buildMaps(hs, gh.stems, active, blues, scale)
+		m := axisMaps{x: x, y: y}
+		cache[sel] = m
+		return m
+	}
+
+	var total int
+	for _, c := range contours {
+		total += len(c)
+	}
+	pts := make([]hintPoint, 0, total)
+	for _, c := range contours {
+		for _, p := range c {
+			ox, oy := p.x*scale, p.y*scale
+			m := getMaps(gh.maskSelAt(len(pts)))
+			pts = append(pts, hintPoint{ox: ox, oy: oy, hx: m.x.remap(ox), hy: m.y.remap(oy), on: p.on})
+		}
+	}
+
+	// Keep flex spans smooth: re-derive each flex region's interior points by
+	// interpolating between its grid-fitted entry (start-1) and exit (end) anchors.
+	for _, fr := range gh.flexRanges {
+		if fr.start-1 < 0 {
+			continue
+		}
+		interpolateFlex(pts, fr.start-1, fr.end)
+	}
 
 	out := make([]contour, len(contours))
-	start := 0
+	idx := 0
 	for ci, c := range contours {
-		active := gh.activeMaskAt(start)
-		xm, ym := buildMaps(hs, gh.stems, active, blues, scale)
 		nc := make(contour, len(c))
-		for j, p := range c {
-			hx := xm.remap(p.x * scale)
-			hy := ym.remap(p.y * scale)
-			nc[j] = outlinePoint{x: hx / scale, y: hy / scale, on: p.on}
+		for j := range c {
+			p := pts[idx]
+			nc[j] = outlinePoint{x: p.hx / scale, y: p.hy / scale, on: p.on}
+			idx++
 		}
 		out[ci] = nc
-		start += len(c)
 	}
 	return out
+}
+
+// axisMaps pairs the x- and y-axis control maps for one active-hintmask
+// selection.
+type axisMaps struct {
+	x, y controlMap
+}
+
+// applyCounterControl equalises the counters of every recorded cntrmask group:
+// within each group the same-orientation stems (independently for horizontal and
+// vertical) are chained at an even, whole-pixel gap so features like the three
+// verticals of 'm' keep uniform spacing after grid-fitting.
+func applyCounterControl(hs []hintedStem, stems []cffStemHint, groups [][]int) {
+	for _, g := range groups {
+		equalizeCounters(hs, stems, g, true)
+		equalizeCounters(hs, stems, g, false)
+	}
+}
+
+// equalizeCounters repositions the horizontal (or vertical) stems of one counter
+// group so the gaps between them are all the group's rounded average gap, keeping
+// each stem's grid-fitted width and anchoring on the first (lowest) stem.
+func equalizeCounters(hs []hintedStem, stems []cffStemHint, group []int, horizontal bool) {
+	var idx []int
+	for _, i := range group {
+		if stems[i].horizontal == horizontal {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) < 2 {
+		return
+	}
+	sort.Slice(idx, func(a, b int) bool { return hs[idx[a]].oLo < hs[idx[b]].oLo })
+	totalGap := 0.0
+	for k := 1; k < len(idx); k++ {
+		totalGap += hs[idx[k]].oLo - hs[idx[k-1]].oHi
+	}
+	gap := math.Round(totalGap / float64(len(idx)-1))
+	if gap < 1 {
+		gap = 1
+	}
+	for k := 1; k < len(idx); k++ {
+		w := hs[idx[k]].hHi - hs[idx[k]].hLo
+		lo := hs[idx[k-1]].hHi + gap
+		hs[idx[k]].hLo = lo
+		hs[idx[k]].hHi = lo + w
+	}
+}
+
+// darkenStems embiggens every stem by d device pixels per edge (its lower edge
+// moves down and its upper edge up), the weight compensation that improves stem
+// contrast on the anti-aliased rasteriser at small sizes.
+func darkenStems(hs []hintedStem, d float64) {
+	for i := range hs {
+		hs[i].hLo -= d
+		hs[i].hHi += d
+	}
+}
+
+// stemDarkenPixels returns the per-edge stem emboldening in device pixels at the
+// given ppem: strongest at small sizes and fading linearly to none at and above
+// darkenMaxPPEM, mirroring FreeType's default stem darkening (a contrast boost
+// for small text that is invisible once glyphs are large enough to hint cleanly).
+func stemDarkenPixels(ppem float64) float64 {
+	if ppem <= 0 || ppem >= darkenMaxPPEM {
+		return 0
+	}
+	return darkenMaxPixels * (1 - ppem/darkenMaxPPEM)
+}
+
+// darkenMaxPPEM is the ppem at (and above) which stem darkening stops, and
+// darkenMaxPixels is its per-edge strength (in device pixels) at ppem→0.
+const (
+	darkenMaxPPEM   = 48
+	darkenMaxPixels = 0.15
+)
+
+// interpolateFlex re-derives the hinted positions of a flex region's interior
+// points (before+1 .. end-1) by IUP-style interpolation between the grid-fitted
+// anchors at indices before and end, so the shallow flex curve keeps its smooth
+// shape rather than each interior point snapping to a stem edge.
+func interpolateFlex(pts []hintPoint, before, end int) {
+	for k := before + 1; k < end; k++ {
+		pts[k].hx = interp1D(pts[before].ox, pts[end].ox, pts[before].hx, pts[end].hx, pts[k].ox)
+		pts[k].hy = interp1D(pts[before].oy, pts[end].oy, pts[before].hy, pts[end].hy, pts[k].oy)
+	}
+}
+
+// interp1D maps o from the original interval [oA, oB] to the hinted interval,
+// carrying the endpoint deltas: when the endpoints share an original coordinate
+// (a degenerate interval) the point takes the anchor A's delta.
+func interp1D(oA, oB, hA, hB, o float64) float64 {
+	dA := hA - oA
+	if oB == oA {
+		return o + dA
+	}
+	t := (o - oA) / (oB - oA)
+	return o + dA + t*((hB-oB)-dA)
 }
 
 // buildMaps assembles the x- and y-axis control maps for one subpath: each

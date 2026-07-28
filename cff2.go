@@ -492,7 +492,13 @@ func (c *cff2Table) outlineHints(gid int, coords []int16) ([]contour, *cffGlyphH
 		return nil, nil, err
 	}
 	m.tm.finishContour()
-	gh := &cffGlyphHints{stems: m.tm.stemHints, hintMasks: m.tm.hintMasks, priv: c.privHints[fd]}
+	gh := &cffGlyphHints{
+		stems:      m.tm.stemHints,
+		hintMasks:  m.tm.hintMasks,
+		cntrGroups: m.tm.cntrGroups,
+		flexRanges: m.tm.flexRanges,
+		priv:       c.privHints[fd],
+	}
 	return m.tm.contours, gh, nil
 }
 
