@@ -99,7 +99,7 @@ func gsubFixture(t *testing.T) *gsub {
 		buildLigature(100, 4),       // matches 3,4
 	})
 	lig := buildLookup(4, [][]byte{buildLigatureSubst(buildCoverage1(3), [][]byte{set})})
-	unsupported := buildLookup(2, [][]byte{{0, 0}}) // type 2 subtable, parsed as no-op
+	unsupported := buildLookup(9, [][]byte{{0, 0}}) // undefined type (>8), parsed as no-op
 
 	scripts := []tScript{{tag: "DFLT", def: &tLangSys{required: 0xFFFF, features: []uint16{0, 1, 2}}}}
 	feats := []tFeature{
