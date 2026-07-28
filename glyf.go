@@ -50,6 +50,31 @@ func (f *Font) glyphContours(gid GlyphIndex) ([]contour, error) {
 	return f.loadGlyph(gid, 0, map[GlyphIndex]bool{})
 }
 
+// glyphInstructions returns the TrueType instruction bytecode attached to a
+// simple glyph gid, or nil for an empty glyph, a composite glyph, or a glyph
+// with no instructions. It is only called after glyphContours has successfully
+// decoded gid, so the loca range and the simple-glyph header are known valid.
+func (f *Font) glyphInstructions(gid GlyphIndex) []byte {
+	start, end := f.loca[gid], f.loca[gid+1]
+	if start == end {
+		return nil // empty glyph (e.g. space)
+	}
+	r := reader{b: f.glyf[start:end]}
+	n := int(r.i16())
+	if n < 0 {
+		return nil // composite glyph: not hinted here
+	}
+	r.skip(8) // xMin, yMin, xMax, yMax
+	for i := 0; i < n; i++ {
+		r.u16() // endPtsOfContours[i]
+	}
+	instrLen := int(r.u16())
+	if instrLen == 0 {
+		return nil
+	}
+	return r.b[r.pos : r.pos+instrLen]
+}
+
 // loadGlyph decodes glyph gid's contours in font units. depth and visited
 // guard composite recursion against over-deep nesting and cycles.
 func (f *Font) loadGlyph(gid GlyphIndex, depth int, visited map[GlyphIndex]bool) ([]contour, error) {
