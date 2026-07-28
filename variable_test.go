@@ -535,6 +535,101 @@ func TestInstanceNegativePeak(t *testing.T) {
 	eqPts(t, flat(cs), [][2]float64{{-5, 0}, {95, 0}, {95, 100}, {-5, 100}})
 }
 
+// --- composite-glyph variation ----------------------------------------------
+
+func TestInstanceCompositeVariation(t *testing.T) {
+	fv := buildFvar(wghtAxis(), nil, false)
+	// Glyph 1: a simple square base whose point 0 is displaced by (5,5) at max.
+	gd1 := buildGlyphVarData(nil, true, true, []rawTuple{{
+		embedPeak: true, peak: []float64{1.0},
+		dX: []int{5, 0, 0, 0, 0, 0, 0, 0},
+		dY: []int{5, 0, 0, 0, 0, 0, 0, 0},
+	}})
+	// Glyph 2: a composite placing glyph 1 at offset (200,300); the single
+	// component offset (gvar point 0) is displaced by (50,-20) at max, ahead of
+	// the four phantom points.
+	gd2 := buildGlyphVarData(nil, true, true, []rawTuple{{
+		embedPeak: true, peak: []float64{1.0},
+		dX: []int{50, 0, 0, 0, 0},
+		dY: []int{-20, 0, 0, 0, 0},
+	}})
+	gv := buildGvar(1, nil, [][]byte{nil, gd1, gd2}, false)
+
+	comp := compositeGlyphBytes([]component{{
+		glyphIndex: 1, arg1: 200, arg2: 300, useWords: true, argsAreXY: true,
+	}})
+	f := makeVarFont(t, [][]byte{nil, squareGlyph(), comp}, fv, gv, nil)
+
+	// At maximum weight both the component offset and the base point move.
+	cs, err := f.InstancePoints(2, map[string]float64{"wght": 900})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eqPts(t, flat(cs), [][2]float64{{255, 285}, {350, 280}, {350, 380}, {250, 380}})
+
+	// At the default weight nothing moves: the plain composite placement.
+	def := [][2]float64{{200, 300}, {300, 300}, {300, 400}, {200, 400}}
+	cs, _ = f.InstancePoints(2, map[string]float64{"wght": 400})
+	eqPts(t, flat(cs), def)
+
+	// glyphContours takes the default path (nil norm): no variation at all.
+	dc, err := f.glyphContours(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eqPts(t, flat(dc), def)
+}
+
+func TestVaryComponentOffsetsEdges(t *testing.T) {
+	comps := []glyphComponent{{arg1: 10, arg2: 20, argsAreXY: true}}
+	reset := func() ([]float64, []float64) { return []float64{10}, []float64{20} }
+	unchanged := func(dxs, dys []float64) {
+		t.Helper()
+		if dxs[0] != 10 || dys[0] != 20 {
+			t.Fatalf("component offsets changed: %v %v", dxs, dys)
+		}
+	}
+	norm := []int16{16384}
+
+	// nil norm: default path, no variation.
+	dxs, dys := reset()
+	(&Font{gvar: &gvarTable{}}).varyComponentOffsets(0, comps, dxs, dys, nil)
+	unchanged(dxs, dys)
+
+	// No gvar table.
+	dxs, dys = reset()
+	(&Font{}).varyComponentOffsets(0, comps, dxs, dys, norm)
+	unchanged(dxs, dys)
+
+	// Glyph id out of range.
+	dxs, dys = reset()
+	f := &Font{gvar: &gvarTable{axisCount: 1, dataOffsets: []uint32{0, 4}, data: make([]byte, 8)}}
+	f.varyComponentOffsets(9, comps, dxs, dys, norm)
+	unchanged(dxs, dys)
+
+	// Empty data range (start >= end).
+	dxs, dys = reset()
+	g := &Font{gvar: &gvarTable{axisCount: 1, dataOffsets: []uint32{0, 0}, data: make([]byte, 8)}}
+	g.varyComponentOffsets(0, comps, dxs, dys, norm)
+	unchanged(dxs, dys)
+
+	// Offset past the data (end > len).
+	dxs, dys = reset()
+	h := &Font{gvar: &gvarTable{axisCount: 1, dataOffsets: []uint32{0, 100}, data: make([]byte, 10)}}
+	h.varyComponentOffsets(0, comps, dxs, dys, norm)
+	unchanged(dxs, dys)
+
+	// Malformed glyph variation data (shared tuple index out of range).
+	dxs, dys = reset()
+	blob := buildGlyphVarData(nil, false, false, []rawTuple{{
+		sharedIdx: 5, private: true, privateAll: true,
+		dX: make([]int, 5), dY: make([]int, 5),
+	}})
+	e := &Font{gvar: &gvarTable{axisCount: 1, dataOffsets: []uint32{0, uint32(len(blob))}, data: blob}}
+	e.varyComponentOffsets(0, comps, dxs, dys, norm)
+	unchanged(dxs, dys)
+}
+
 func TestParseRejectsMalformedVariationTables(t *testing.T) {
 	base := func() map[string][]byte {
 		loca, glyf := glyfAndLoca([][]byte{nil, squareGlyph()}, false)
@@ -816,7 +911,7 @@ func TestAccumulateOutOfRangePoint(t *testing.T) {
 	pts := []outlinePoint{{0, 0, true}, {100, 0, true}, {100, 100, true}, {0, 100, true}}
 	// Point index 1000 is out of range and must be skipped.
 	accumulate(1, false, []int{0, 1000}, []float64{5, 99}, []float64{0, 0},
-		[]int{3}, pts, accX, accY)
+		[]int{3}, pts, accX, accY, true)
 	if accX[0] != 5 {
 		t.Fatalf("valid point not accumulated: %v", accX)
 	}
