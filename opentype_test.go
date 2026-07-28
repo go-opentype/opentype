@@ -298,6 +298,44 @@ func TestGlyphMaskComposites(t *testing.T) {
 	}
 }
 
+// GlyphMaskIndex renders a glyph selected by its index, and — for a glyph the
+// cmap maps from a rune — yields the identical mask, bounds and advance that
+// GlyphMask produces for that rune. This is the property a shaper relies on:
+// the glyph indices it emits blit exactly like the rune-mapped glyphs.
+func TestGlyphMaskIndexMatchesGlyphMask(t *testing.T) {
+	f := mustParse(t, stdBytes(false, false))
+	fc := f.NewFace(64)
+	gid, ok := f.GlyphIndex('A')
+	if !ok {
+		t.Fatal("GlyphIndex('A') not mapped")
+	}
+	rb, rm, rp, ra, rok := fc.GlyphMask('A', 10, 40)
+	ib, im, ip, ia, iok := fc.GlyphMaskIndex(gid, 10, 40)
+	if !iok || !rok {
+		t.Fatalf("ok mismatch: byIndex=%v byRune=%v", iok, rok)
+	}
+	if ib != rb || ip != rp || ia != ra {
+		t.Fatalf("bounds/maskp/advance mismatch: index=(%v,%v,%d) rune=(%v,%v,%d)", ib, ip, ia, rb, rp, ra)
+	}
+	if im != rm { // same cached mask pointer
+		t.Fatalf("mask mismatch: index=%p rune=%p", im, rm)
+	}
+	if ip != (image.Point{}) {
+		t.Errorf("maskp=%v want origin", ip)
+	}
+}
+
+// An out-of-range glyph index renders nothing and reports ok=false, mirroring
+// GlyphMask's blank-for-unmapped contract.
+func TestGlyphMaskIndexOutOfRange(t *testing.T) {
+	f := mustParse(t, stdBytes(false, false))
+	fc := f.NewFace(64)
+	bounds, mask, _, adv, ok := fc.GlyphMaskIndex(GlyphIndex(f.NumGlyphs()+100), 0, 0)
+	if ok || mask != nil || adv != 0 || !bounds.Empty() {
+		t.Fatalf("out-of-range gid: ok=%v mask=%v adv=%d bounds=%v, want blank", ok, mask, adv, bounds)
+	}
+}
+
 func TestGlyphMaskOffCurveSizes(t *testing.T) {
 	f := mustParse(t, stdBytes(false, false))
 	// Large size: many flatten steps; tiny size: the steps<1 clamp.
