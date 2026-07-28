@@ -13,11 +13,11 @@ type cmapLookup interface {
 }
 
 // parseCmap selects and decodes a Unicode cmap subtable. It understands
-// formats 0, 2, 4, 6 and 12 for the base rune->glyph mapping, preferring
-// whichever can represent the most codepoints: 12 > 4 > 6 > 2 > 0. Format 14
-// (Unicode Variation Sequences) is a separate, always-parsed side table
-// exposed through Font.GlyphIndexVariation; it never competes for f.cmap and
-// its presence does not change ordinary GlyphIndex behaviour.
+// formats 0, 2, 4, 6, 12 and 13 for the base rune->glyph mapping, preferring
+// whichever can represent the most codepoints: 13 = 12 > 4 > 6 > 2 > 0.
+// Format 14 (Unicode Variation Sequences) is a separate, always-parsed side
+// table exposed through Font.GlyphIndexVariation; it never competes for f.cmap
+// and its presence does not change ordinary GlyphIndex behaviour.
 func (f *Font) parseCmap(b []byte) error {
 	r := reader{b: b}
 	r.skip(2) // version
@@ -59,6 +59,9 @@ func (f *Font) parseCmap(b []byte) error {
 			score = 4
 		case 12:
 			lk, err = parseCmap12(sub)
+			score = 5
+		case 13:
+			lk, err = parseCmap13(sub)
 			score = 5
 		case 14:
 			vs, verr := parseCmap14(sub)
@@ -215,6 +218,65 @@ func (c *cmap12) lookup(r rune) (GlyphIndex, bool) {
 			lo = mid + 1
 		} else {
 			return GlyphIndex(g.startGID + (cc - g.start)), true
+		}
+	}
+	return 0, false
+}
+
+// cmap13group is one constant-map group of a format-13 subtable: every code
+// point in [start, end] maps to the single glyph glyphID.
+type cmap13group struct {
+	start   uint32
+	end     uint32
+	glyphID uint32
+}
+
+// cmap13 is a decoded format-13 (many-to-one range mappings) subtable. Its
+// on-disk layout is identical to format 12, but the third group field is read
+// with different semantics: format 12's startGlyphID advances one glyph per
+// code point across a group, whereas format 13's glyphID is a constant so the
+// whole range collapses onto a single glyph. This is what LastResort and other
+// fallback fonts use to point every code point in a block at one "missing
+// glyph" placeholder.
+type cmap13 struct {
+	groups []cmap13group
+}
+
+// parseCmap13 decodes a format-13 subtable from sub (starting at the format
+// field).
+func parseCmap13(sub []byte) (cmapLookup, error) {
+	r := reader{b: sub}
+	r.skip(12) // format, reserved, length, language
+	numGroups := int(r.u32())
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 13 header: %w", r.err)
+	}
+	c := &cmap13{groups: make([]cmap13group, numGroups)}
+	for i := 0; i < numGroups; i++ {
+		c.groups[i].start = r.u32()
+		c.groups[i].end = r.u32()
+		c.groups[i].glyphID = r.u32()
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cmap format 13 groups: %w", r.err)
+	}
+	return c, nil
+}
+
+// lookup implements the format-13 binary search over sorted groups, returning
+// the group's constant glyph for any code point it covers.
+func (c *cmap13) lookup(r rune) (GlyphIndex, bool) {
+	cc := uint32(r)
+	lo, hi := 0, len(c.groups)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		g := c.groups[mid]
+		if cc < g.start {
+			hi = mid
+		} else if cc > g.end {
+			lo = mid + 1
+		} else {
+			return GlyphIndex(g.glyphID), true
 		}
 	}
 	return 0, false

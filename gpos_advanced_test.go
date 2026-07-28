@@ -278,6 +278,74 @@ func buildContextPos1(cov []byte, sets [][]byte) []byte {
 	return w.bytes()
 }
 
+// buildContextPos2 builds a format-2 (class-based) contextual subtable from a
+// coverage, a ClassDef and a list of PosClassSet blobs. A nil set yields a NULL
+// (zero) set offset.
+func buildContextPos2(cov, classDef []byte, sets [][]byte) []byte {
+	n := len(sets)
+	header := 8 + 2*n
+	body := &bw{}
+	setOffs := make([]int, n)
+	for i, s := range sets {
+		if s == nil {
+			continue
+		}
+		setOffs[i] = header + len(body.b)
+		body.b = append(body.b, s...)
+	}
+	covOff := header + len(body.b)
+	classOff := covOff + len(cov)
+	w := &bw{}
+	w.u16(2)
+	w.u16(uint16(covOff))
+	w.u16(uint16(classOff))
+	w.u16(uint16(n))
+	for _, o := range setOffs {
+		w.u16(uint16(o))
+	}
+	w.b = append(w.b, body.b...)
+	w.b = append(w.b, cov...)
+	w.b = append(w.b, classDef...)
+	return w.bytes()
+}
+
+// buildChainPos2 builds a format-2 (class-based) chaining subtable from a
+// coverage, the backtrack/input/lookahead ClassDefs and ChainPosClassSet blobs.
+// A nil set yields a NULL (zero) set offset.
+func buildChainPos2(cov, btCD, inCD, laCD []byte, sets [][]byte) []byte {
+	n := len(sets)
+	header := 12 + 2*n
+	body := &bw{}
+	setOffs := make([]int, n)
+	for i, s := range sets {
+		if s == nil {
+			continue
+		}
+		setOffs[i] = header + len(body.b)
+		body.b = append(body.b, s...)
+	}
+	covOff := header + len(body.b)
+	btOff := covOff + len(cov)
+	inOff := btOff + len(btCD)
+	laOff := inOff + len(inCD)
+	w := &bw{}
+	w.u16(2)
+	w.u16(uint16(covOff))
+	w.u16(uint16(btOff))
+	w.u16(uint16(inOff))
+	w.u16(uint16(laOff))
+	w.u16(uint16(n))
+	for _, o := range setOffs {
+		w.u16(uint16(o))
+	}
+	w.b = append(w.b, body.b...)
+	w.b = append(w.b, cov...)
+	w.b = append(w.b, btCD...)
+	w.b = append(w.b, inCD...)
+	w.b = append(w.b, laCD...)
+	return w.bytes()
+}
+
 func buildContextPos3(covs [][]byte, recs []plr) []byte {
 	gc := len(covs)
 	header := 6 + 2*gc + 4*len(recs)
@@ -854,20 +922,85 @@ func TestContextPos3(t *testing.T) {
 	}
 }
 
+func TestContextPos2(t *testing.T) {
+	// classDef: 20->0, 21->1, 22->2. Coverage gates the first glyph on {20,21}.
+	cd := buildClassDef1(20, 0, 1, 2)
+	// Class-1 first glyph followed by a class-2 glyph runs lookup 1 at seq 0.
+	rule := buildPosRule([]GlyphIndex{2}, []plr{{seq: 0, lookup: 1}})
+	set1 := buildPosRuleSet([][]byte{rule})
+	// sets indexed by class: class 0 and class 2 have NULL sets.
+	st := buildContextPos2(buildCoverage1(20, 21), cd, [][]byte{nil, set1, nil})
+	g := gposWith(t, "test", []uint16{0}, [][]byte{buildLookup(7, [][]byte{st}), singleAdvLookup(21, -30)})
+	// 21 (class 1) then 22 (class 2): matches, adjusting the covered glyph.
+	pos := g.position([]GlyphIndex{21, 22}, nil, "test")
+	if pos[0].XAdvance != -30 {
+		t.Fatalf("contextpos2 pos=%+v", pos)
+	}
+	// First glyph in a class with a NULL set (20 is class 0): no rule, no apply.
+	if pos := g.position([]GlyphIndex{20, 22}, nil, "test"); pos[0].XAdvance != 0 {
+		t.Errorf("contextpos2 NULL-set applied pos=%+v", pos)
+	}
+	// Input class mismatch (second glyph is class 0, not 2).
+	if pos := g.position([]GlyphIndex{21, 20}, nil, "test"); pos[0].XAdvance != 0 {
+		t.Errorf("contextpos2 input mismatch applied pos=%+v", pos)
+	}
+	// Input runs off the end of the run (bounds guard in the class matcher).
+	if pos := g.position([]GlyphIndex{21}, nil, "test"); pos[0].XAdvance != 0 {
+		t.Errorf("contextpos2 short-run applied pos=%+v", pos)
+	}
+	// First glyph not covered.
+	if pos := g.position([]GlyphIndex{22, 22}, nil, "test"); pos[0].XAdvance != 0 {
+		t.Errorf("contextpos2 uncovered applied pos=%+v", pos)
+	}
+}
+
+func TestContextPos2ClassIndexGuard(t *testing.T) {
+	// The covered glyph's class (5) runs past the two-entry sets slice.
+	cd := buildClassDef1(21, 5)
+	rule := buildPosRule(nil, []plr{{seq: 0, lookup: 1}})
+	st := buildContextPos2(buildCoverage1(21), cd, [][]byte{nil, buildPosRuleSet([][]byte{rule})})
+	pt := mustSubtable(t, 7, st)
+	ctx := &posContext{g: &gpos{lookups: make([]gposLookup, 2)}, glyphs: []GlyphIndex{21}, positions: make([]GlyphPosition, 1)}
+	if pt.apply(ctx, 0) {
+		t.Error("contextpos2 applied with class index out of range")
+	}
+}
+
+func TestContextPos2ParseErrors(t *testing.T) {
+	// Truncated header (count claims a set offset the bytes do not carry).
+	if _, err := parseContextPos2([]byte{0, 2, 0, 8, 0, 0, 0, 1}); err == nil {
+		t.Error("contextpos2 truncated should error")
+	}
+	base := func() []byte {
+		rule := buildPosRule([]GlyphIndex{1}, []plr{{seq: 0, lookup: 0}})
+		return buildContextPos2(buildCoverage1(1), buildClassDef1(1, 1), [][]byte{nil, buildPosRuleSet([][]byte{rule})})
+	}
+	// Bad coverage offset (bytes 2-3).
+	badCov := base()
+	badCov[2], badCov[3] = 0xFF, 0xFF
+	if _, err := parseContextPos2(badCov); err == nil {
+		t.Error("contextpos2 bad coverage should error")
+	}
+	// Bad classDef offset (bytes 4-5).
+	badCD := base()
+	badCD[4], badCD[5] = 0xFF, 0xFF
+	if _, err := parseContextPos2(badCD); err == nil {
+		t.Error("contextpos2 bad classDef should error")
+	}
+	// Bad set offset (the class-1 set offset field sits at byte 8).
+	badSet := base()
+	badSet[8], badSet[9] = 0xFF, 0xFF
+	if _, err := parseContextPos2(badSet); err == nil {
+		t.Error("contextpos2 bad set offset should error")
+	}
+}
+
 func TestContextPosParseErrors(t *testing.T) {
 	if _, err := parseContextPos([]byte{0}); err == nil {
 		t.Error("contextpos truncated format should error")
 	}
 	if _, err := parseContextPos([]byte{0, 9}); err == nil {
 		t.Error("contextpos bad format should error")
-	}
-	// Format 2 is deferred: a no-op subtable, dropped from the lookup.
-	lk, err := parseGPOSLookup(buildLookup(7, [][]byte{{0, 2, 0, 0, 0, 0}}))
-	if err != nil {
-		t.Fatalf("contextpos format 2 parse: %v", err)
-	}
-	if len(lk.subtables) != 0 {
-		t.Errorf("contextpos format 2 should be dropped, got %d subtables", len(lk.subtables))
 	}
 	// Truncated format-1 / format-3 headers and bad coverage.
 	if _, err := parseContextPos1([]byte{0, 1, 0, 6, 0, 1}); err == nil {
@@ -986,19 +1119,83 @@ func TestChainPos3(t *testing.T) {
 	}
 }
 
+func TestChainPos2(t *testing.T) {
+	btCD := buildClassDef1(10, 1)    // 10 -> class 1
+	inCD := buildClassDef1(30, 1, 2) // 30 -> class 1, 31 -> class 2
+	laCD := buildClassDef1(40, 1)    // 40 -> class 1
+	// First glyph input class 1, second input class 2; backtrack class 1,
+	// lookahead class 1. Runs lookup 1 at seq 0.
+	rule := buildPosChainRule([]GlyphIndex{1}, []GlyphIndex{2}, []GlyphIndex{1}, []plr{{seq: 0, lookup: 1}})
+	set1 := buildPosRuleSet([][]byte{rule})
+	// Coverage on {30 (input class 1), 32 (input class 0, NULL set)}.
+	st := buildChainPos2(buildCoverage1(30, 32), btCD, inCD, laCD, [][]byte{nil, set1})
+	g := gposWith(t, "test", []uint16{0}, [][]byte{buildLookup(8, [][]byte{st}), singleAdvLookup(30, -25)})
+	pos := g.position([]GlyphIndex{10, 30, 31, 40}, nil, "test")
+	if pos[1].XAdvance != -25 {
+		t.Fatalf("chainpos2 pos=%+v", pos)
+	}
+	// Backtrack class mismatch (leading glyph 99 is class 0).
+	if pos := g.position([]GlyphIndex{99, 30, 31, 40}, nil, "test"); pos[1].XAdvance != 0 {
+		t.Errorf("chainpos2 backtrack mismatch applied pos=%+v", pos)
+	}
+	// Input class mismatch (second input glyph 40 is class 0, not 2).
+	if pos := g.position([]GlyphIndex{10, 30, 40, 40}, nil, "test"); pos[1].XAdvance != 0 {
+		t.Errorf("chainpos2 input mismatch applied pos=%+v", pos)
+	}
+	// Lookahead class mismatch (trailing glyph 99 is class 0).
+	if pos := g.position([]GlyphIndex{10, 30, 31, 99}, nil, "test"); pos[1].XAdvance != 0 {
+		t.Errorf("chainpos2 lookahead mismatch applied pos=%+v", pos)
+	}
+	// Covered glyph in a class with a NULL set (32 is input class 0).
+	if pos := g.position([]GlyphIndex{32}, nil, "test"); pos[0].XAdvance != 0 {
+		t.Errorf("chainpos2 NULL-set applied pos=%+v", pos)
+	}
+	// Uncovered first glyph.
+	if pos := g.position([]GlyphIndex{10, 31, 31, 40}, nil, "test"); pos[1].XAdvance != 0 {
+		t.Errorf("chainpos2 uncovered applied pos=%+v", pos)
+	}
+}
+
+func TestChainPos2ClassIndexGuard(t *testing.T) {
+	// The covered glyph's input class (5) runs past the two-entry sets slice.
+	inCD := buildClassDef1(30, 5)
+	rule := buildPosChainRule(nil, nil, nil, []plr{{seq: 0, lookup: 1}})
+	st := buildChainPos2(buildCoverage1(30), buildClassDef1(10, 1), inCD, buildClassDef1(40, 1),
+		[][]byte{nil, buildPosRuleSet([][]byte{rule})})
+	pt := mustSubtable(t, 8, st)
+	ctx := &posContext{g: &gpos{lookups: make([]gposLookup, 2)}, glyphs: []GlyphIndex{30}, positions: make([]GlyphPosition, 1)}
+	if pt.apply(ctx, 0) {
+		t.Error("chainpos2 applied with class index out of range")
+	}
+}
+
+func TestChainPos2ParseErrors(t *testing.T) {
+	// Truncated header (count claims a set offset the bytes do not carry).
+	if _, err := parseChainPos2([]byte{0, 2, 0, 12, 0, 0, 0, 0, 0, 0, 0, 1}); err == nil {
+		t.Error("chainpos2 truncated should error")
+	}
+	base := func() []byte {
+		rule := buildPosChainRule([]GlyphIndex{1}, []GlyphIndex{2}, []GlyphIndex{1}, []plr{{seq: 0, lookup: 0}})
+		return buildChainPos2(buildCoverage1(30), buildClassDef1(10, 1), buildClassDef1(30, 1, 2),
+			buildClassDef1(40, 1), [][]byte{nil, buildPosRuleSet([][]byte{rule})})
+	}
+	// Corrupt each offset field in turn: coverage(2), backtrack(4), input(6),
+	// lookahead(8), and the class-1 set offset(12).
+	for name, off := range map[string]int{"coverage": 2, "backtrackClass": 4, "inputClass": 6, "lookaheadClass": 8, "set": 12} {
+		blob := base()
+		blob[off], blob[off+1] = 0xFF, 0xFF
+		if _, err := parseChainPos2(blob); err == nil {
+			t.Errorf("chainpos2 bad %s should error", name)
+		}
+	}
+}
+
 func TestChainPosParseErrors(t *testing.T) {
 	if _, err := parseChainPos([]byte{0}); err == nil {
 		t.Error("chainpos truncated format should error")
 	}
 	if _, err := parseChainPos([]byte{0, 9}); err == nil {
 		t.Error("chainpos bad format should error")
-	}
-	lk, err := parseGPOSLookup(buildLookup(8, [][]byte{{0, 2, 0, 0, 0, 0}}))
-	if err != nil {
-		t.Fatalf("chainpos format 2 parse: %v", err)
-	}
-	if len(lk.subtables) != 0 {
-		t.Errorf("chainpos format 2 should be dropped, got %d", len(lk.subtables))
 	}
 	if _, err := parseChainPos1([]byte{0, 1, 0, 6, 0, 1}); err == nil {
 		t.Error("chainpos1 truncated should error")
