@@ -208,15 +208,30 @@ func (fc *Face) GlyphMaskIndex(gid GlyphIndex, x, y int) (bounds image.Rectangle
 //
 // A CFF2 font is inherently variable: its outlines are instanced at the face's
 // variation coordinates (the default master when none is set), converted to the
-// normalized F2Dot14 form cff2.outline expects via NormalizeCoords. CFF1
-// outlines are returned as-is (CFF1 has no variation and CFF hinting is
-// deferred, see cff.go), so SetHinting affects glyf fonts only.
+// normalized F2Dot14 form cff2.outline expects via NormalizeCoords. When hinting
+// is enabled both CFF2 and CFF1 outlines are grid-fitted (see cffhint.go), so
+// SetHinting affects all three outline flavours; with hinting off they are
+// returned unhinted.
 func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
 	if fc.font.cff2 != nil {
-		return fc.font.cff2.outline(int(gid), fc.font.NormalizeCoords(fc.varCoords))
+		contours, gh, err := fc.font.cff2.outlineHints(int(gid), fc.font.NormalizeCoords(fc.varCoords))
+		if err != nil {
+			return nil, err
+		}
+		if fc.hinting {
+			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx))
+		}
+		return contours, nil
 	}
 	if fc.font.cff != nil {
-		return fc.font.cff.outline(int(gid))
+		contours, gh, err := fc.font.cff.outlineHints(int(gid))
+		if err != nil {
+			return nil, err
+		}
+		if fc.hinting {
+			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx))
+		}
+		return contours, nil
 	}
 	var (
 		contours []contour
