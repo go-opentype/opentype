@@ -27,34 +27,45 @@ import (
 //
 // # Implemented opcodes
 //
+// The full standard TrueType instruction set (per the Apple/Microsoft
+// specification, as FreeType implements) is supported:
+//
 // Push:        NPUSHB NPUSHW PUSHB[0-7] PUSHW[0-7]
 // Stack:       DUP POP CLEAR SWAP DEPTH CINDEX MINDEX ROLL
 // Arithmetic:  ADD SUB DIV MUL ABS NEG FLOOR CEILING MAX MIN
+//              ROUND[abcd] NROUND[abcd] ODD EVEN
 // Logic:       AND OR NOT LT LTEQ GT GTEQ EQ NEQ
-// Control:     IF ELSE EIF JMPR JROT JROF
+// Control:     IF ELSE EIF JMPR JROT JROF DEBUG
 // Storage:     RS WS
 // CVT:         RCVT WCVTP WCVTF
-// State:       SVTCA SPVTCA SFVTCA SRP0 SRP1 SRP2 SZP0 SZP1 SZP2 SZPS
-//              RTG RTHG RTDG RUTG RDTG ROFF SROUND S45ROUND SLOOP SMD SCVTCI
-//              SDB SDS
+// Vectors:     SVTCA SPVTCA SFVTCA SPVTL SFVTL SDPVTL SPVFS SFVFS SFVTPV
+//              GPV GFV
+// State:       SRP0 SRP1 SRP2 SZP0 SZP1 SZP2 SZPS RTG RTHG RTDG RUTG RDTG
+//              ROFF SROUND S45ROUND SLOOP SMD SCVTCI SDB SDS SSW SSWCI
+//              FLIPON FLIPOFF SCANCTRL SCANTYPE INSTCTRL SANGW AA
 // Functions:   FDEF ENDF CALL LOOPCALL IDEF
-// Points:      GC SCFS MDAP MIAP MDRP MIRP SHP SHPIX IP ALIGNRP IUP
+// Points:      GC SCFS MD MDAP MIAP MDRP MIRP MSIRP SHP SHC SHZ SHPIX IP
+//              ISECT ALIGNPTS ALIGNRP UTP IUP FLIPPT FLIPRGON FLIPRGOFF
 // Delta:       DELTAP1 DELTAP2 DELTAP3 DELTAC1 DELTAC2 DELTAC3
-// Info:        MPPEM MPS GETINFO
+// Info:        MPPEM MPS GETINFO GETVARIATION GETDATA
 //
-// # Not implemented
+// Instructions that have no meaningful effect for a supersampled, grayscale
+// rasteriser (dropout control SCANCTRL/SCANTYPE, the grid-fit flags INSTCTRL,
+// the obsolete SANGW/AA, single-width SSW/SSWCI) are accepted: they update the
+// relevant graphics state and consume their stack arguments but perform no
+// geometry change, matching FreeType's acceptance of them. GETVARIATION reports
+// the default (unvaried) instance by pushing no axis coordinates; GETDATA
+// returns the classic constant 17.
 //
-// The remaining ~80 opcodes are deliberately out of scope for this core:
-// SPVTL/SFVTL/SDPVTL/SPVFS/SFVFS/GPV/GFV (arbitrary vectors from lines/stack),
-// ISECT, MSIRP, ALIGNPTS, UTP, FLIPPT/FLIPRGON/FLIPRGOFF/FLIPON/FLIPOFF,
-// SANGW, AA, SDPVTL, MIN/MAX are covered but SCANCTRL/SCANTYPE/INSTCTRL,
-// GETVARIATION, GETDATA, ODD/EVEN, SxxxW single-width, and the debug DEBUG
-// opcode are not. Any opcode with no handler (and no matching IDEF) reaches a
-// single covered fallback that reports "unimplemented opcode". Because every
-// unimplemented opcode is a single byte (only the push family carries inline
-// operands, and those are implemented), skipping such an opcode is a simple
-// one-byte advance; the fallback errors rather than silently skipping so that
-// callers learn a program used something outside this core.
+// # Reserved opcodes
+//
+// The opcodes the specification leaves undefined (0x28, 0x7B, 0x83, 0x84, 0x8F,
+// 0x90 and 0x93-0xAF) have no handler. Any such opcode with no matching IDEF
+// reaches a single covered fallback that reports "unimplemented opcode".
+// Because every reserved opcode is a single byte (only the push family carries
+// inline operands, and those are implemented), skipping such an opcode would be
+// a simple one-byte advance; the fallback errors rather than silently skipping
+// so that callers learn a program used an undefined instruction.
 
 // Interpreter guards. maxHintBudget bounds total instructions executed to stop
 // runaway loops; maxCallDepth bounds CALL/LOOPCALL/IDEF recursion.
@@ -111,6 +122,16 @@ type gstate struct {
 	cvtCutIn      int32
 	deltaBase     int
 	deltaShift    int
+
+	// Accepted-but-inert state. These are updated and their arguments consumed
+	// so real font programs run to completion, but they have no effect on the
+	// supersampled grayscale geometry this interpreter produces.
+	autoFlip         bool  // FLIPON/FLIPOFF: auto-flip point on/off status
+	scanControl      int32 // SCANCTRL dropout-control flags
+	scanType         int32 // SCANTYPE dropout-control rule
+	instructControl  int32 // INSTCTRL grid-fit control flags
+	singleWidth      int32 // SSW single-width value (F26Dot6)
+	singleWidthCutIn int32 // SSWCI single-width cut-in (F26Dot6)
 }
 
 // funcDef is a defined function's body (the bytes between FDEF and ENDF).
@@ -224,6 +245,7 @@ func (it *interp) resetState() {
 		cvtCutIn:   f26(17.0 / 16.0),
 		deltaBase:  9,
 		deltaShift: 3,
+		autoFlip:   true, // TrueType default is auto-flip enabled
 	}
 }
 
@@ -756,6 +778,24 @@ func (it *interp) dataOp(op uint8, depth int) error {
 		it.setAxis(op&1 != 0, true, false)
 	case 0x04, 0x05: // SFVTCA
 		it.setAxis(op&1 != 0, false, true)
+	case 0x06, 0x07: // SPVTL: projection (and dual) vector from a line
+		it.doSxVTL(op&1 != 0, false)
+	case 0x08, 0x09: // SFVTL: freedom vector from a line
+		it.doSxVTL(op&1 != 0, true)
+	case 0x86, 0x87: // SDPVTL: dual projection vector from a line
+		it.doSDPVTL(op&1 != 0)
+	case 0x0A: // SPVFS: projection (and dual) vector from the stack
+		it.doSVFS(true)
+	case 0x0B: // SFVFS: freedom vector from the stack
+		it.doSVFS(false)
+	case 0x0C: // GPV: push the projection vector as two F2Dot14 components
+		it.push(f2dot14(it.pv.x))
+		it.push(f2dot14(it.pv.y))
+	case 0x0D: // GFV: push the freedom vector as two F2Dot14 components
+		it.push(f2dot14(it.fv.x))
+		it.push(f2dot14(it.fv.y))
+	case 0x0E: // SFVTPV: set the freedom vector to the projection vector
+		it.fv = it.pv
 	case 0x10: // SRP0
 		it.rp0 = int(it.pop())
 	case 0x11: // SRP1
@@ -776,7 +816,7 @@ func (it *interp) dataOp(op uint8, depth int) error {
 		it.round = roundState{mode: rndGrid, period: 64, phase: 0, threshold: 32}
 	case 0x19: // RTHG
 		it.round = roundState{mode: rndGrid, period: 64, phase: 32, threshold: 32}
-	case 0x3A: // RTDG
+	case 0x3D: // RTDG
 		it.round = roundState{mode: rndGrid, period: 32, phase: 0, threshold: 16}
 	case 0x7C: // RUTG
 		it.round = roundState{mode: rndUp}
@@ -796,6 +836,36 @@ func (it *interp) dataOp(op uint8, depth int) error {
 		it.deltaBase = int(it.pop())
 	case 0x5F: // SDS
 		it.deltaShift = int(it.pop())
+	case 0x1F: // SSW: single-width value, given in font units
+		it.singleWidth = f26(float64(it.pop()) * it.scale)
+	case 0x1E: // SSWCI: single-width cut-in, already in F26Dot6 pixels
+		it.singleWidthCutIn = it.pop()
+	case 0x4D: // FLIPON: enable auto point on/off flipping
+		it.autoFlip = true
+	case 0x4E: // FLIPOFF: disable auto point on/off flipping
+		it.autoFlip = false
+	case 0x85: // SCANCTRL: dropout-control flags (inert here)
+		it.scanControl = it.pop()
+	case 0x8D: // SCANTYPE: dropout-control rule (inert here)
+		it.scanType = it.pop()
+	case 0x8E: // INSTCTRL: grid-fit control flags (inert here)
+		it.doINSTCTRL()
+	case 0x7E: // SANGW: set angle weight (obsolete: consume arg, no effect)
+		it.pop()
+	case 0x7F: // AA: adjust angle (obsolete: consume arg, no effect)
+		it.pop()
+	case 0x4F: // DEBUG: consume arg, no effect
+		it.pop()
+
+	// rounding and measurement of stack values
+	case 0x68, 0x69, 0x6A, 0x6B: // ROUND[ab]: round per current state
+		it.push(int32(it.round.apply(float64(it.pop()))))
+	case 0x6C, 0x6D, 0x6E, 0x6F: // NROUND[ab]: no engine compensation -> identity
+		it.push(it.pop())
+	case 0x56: // ODD: is the rounded value an odd number of pixels?
+		it.push(boolI(int32(it.round.apply(float64(it.pop())))&127 == 64))
+	case 0x57: // EVEN: is the rounded value an even number of pixels?
+		it.push(boolI(int32(it.round.apply(float64(it.pop())))&127 == 0))
 
 	// measurement and movement
 	case 0x46, 0x47: // GC
@@ -816,6 +886,26 @@ func (it *interp) dataOp(op uint8, depth int) error {
 		it.doALIGNRP()
 	case 0x30, 0x31: // IUP
 		it.doIUP(op&1 != 0)
+	case 0x49, 0x4A: // MD: measure distance between two points
+		it.doMD(op&1 != 0)
+	case 0x3A, 0x3B: // MSIRP: move stack-indirect relative point
+		it.doMSIRP(op&1 != 0)
+	case 0x0F: // ISECT: move a point to the intersection of two lines
+		it.doISECT()
+	case 0x27: // ALIGNPTS: align two points to their midpoint
+		it.doALIGNPTS()
+	case 0x29: // UTP: untouch point
+		it.doUTP()
+	case 0x34, 0x35: // SHC: shift contour by a reference point's movement
+		it.doSHC(op&1 != 0)
+	case 0x36, 0x37: // SHZ: shift a whole zone by a reference point's movement
+		it.doSHZ(op&1 != 0)
+	case 0x80: // FLIPPT: flip on/off status of looped points
+		it.doFLIPPT()
+	case 0x81: // FLIPRGON: set a point range on-curve
+		it.doFlipRange(true)
+	case 0x82: // FLIPRGOFF: set a point range off-curve
+		it.doFlipRange(false)
 
 	// delta exceptions
 	case 0x5D: // DELTAP1
@@ -838,6 +928,9 @@ func (it *interp) dataOp(op uint8, depth int) error {
 		it.push(int32(it.ppem))
 	case 0x88: // GETINFO
 		it.doGetInfo()
+	case 0x91: // GETVARIATION: default (unvaried) instance -> push no axis coords
+	case 0x92: // GETDATA: FreeType returns the classic constant 17
+		it.push(17)
 
 	default:
 		// MDRP 0xC0-0xDF, MIRP 0xE0-0xFF are handled by range; anything else is
@@ -1357,6 +1450,285 @@ func (it *interp) doGetInfo() {
 		res |= 1 << 12 // grayscale active
 	}
 	it.push(res)
+}
+
+// --- vector / measurement opcodes -------------------------------------------
+
+// f2dot14 converts a float unit-vector component to the on-wire F2Dot14 form.
+func f2dot14(v float64) int32 { return int32(math.Round(v * 16384)) }
+
+// normVec returns the unit vector along (x,y), or the x-axis when (x,y) is zero
+// (matching FreeType's fallback for a degenerate line).
+func normVec(x, y float64) vec {
+	l := math.Hypot(x, y)
+	if l == 0 {
+		return vec{1, 0}
+	}
+	return vec{x / l, y / l}
+}
+
+// lineVec builds a unit vector from an integer line delta, rotated 90° when
+// perp is set (SxVTL[1] asks for the vector perpendicular to the line).
+func lineVec(dx, dy int32, perp bool) vec {
+	fx, fy := float64(dx), float64(dy)
+	if perp {
+		fx, fy = -fy, fx
+	}
+	return normVec(fx, fy)
+}
+
+// doSxVTL sets the projection (setFree false) or freedom (setFree true) vector
+// to the line through two points, or its perpendicular. SPVTL also aligns the
+// dual vector.
+func (it *interp) doSxVTL(perp, setFree bool) {
+	p1 := int(it.pop()) // top operand, taken from zp2
+	p2 := int(it.pop()) // deeper operand, taken from zp1
+	a := it.pt(it.zp2, p1)
+	b := it.pt(it.zp1, p2)
+	if it.err != nil {
+		return
+	}
+	v := lineVec(b.curX-a.curX, b.curY-a.curY, perp)
+	if setFree {
+		it.fv = v
+	} else {
+		it.pv, it.dv = v, v
+	}
+}
+
+// doSDPVTL sets the dual projection vector from the original outline and the
+// projection vector from the current outline of the same line.
+func (it *interp) doSDPVTL(perp bool) {
+	p1 := int(it.pop())
+	p2 := int(it.pop())
+	a := it.pt(it.zp2, p1)
+	b := it.pt(it.zp1, p2)
+	if it.err != nil {
+		return
+	}
+	it.dv = lineVec(b.origX-a.origX, b.origY-a.origY, perp)
+	it.pv = lineVec(b.curX-a.curX, b.curY-a.curY, perp)
+}
+
+// doSVFS sets the projection (proj true) or freedom vector from two F2Dot14
+// stack components. SPVFS also aligns the dual vector.
+func (it *interp) doSVFS(proj bool) {
+	y := it.pop()
+	x := it.pop()
+	if it.err != nil {
+		return
+	}
+	v := normVec(float64(x)/16384, float64(y)/16384)
+	if proj {
+		it.pv, it.dv = v, v
+	} else {
+		it.fv = v
+	}
+}
+
+// doMD measures the distance between two points, in the current outline when
+// useCur is set (MD[1], opcode 0x49) or the original outline otherwise
+// (MD[0], opcode 0x4A).
+func (it *interp) doMD(useCur bool) {
+	p1i := int(it.pop()) // top operand, from zp1
+	p2i := int(it.pop()) // deeper operand, from zp0
+	p1 := it.pt(it.zp1, p1i)
+	p2 := it.pt(it.zp0, p2i)
+	if it.err != nil {
+		return
+	}
+	var d float64
+	if useCur {
+		d = it.project(p2.curX-p1.curX, p2.curY-p1.curY)
+	} else {
+		d = it.dualProject(p2.origX-p1.origX, p2.origY-p1.origY)
+	}
+	it.push(int32(math.Round(d)))
+}
+
+// doMSIRP moves a point so its distance from rp0 equals a stack value. When the
+// point is in the twilight zone it is first seeded at rp0's position. bit 0 of
+// the opcode additionally sets rp0 to the moved point.
+func (it *interp) doMSIRP(setRP0 bool) {
+	d := it.pop()        // top operand: target distance in F26Dot6
+	idx := int(it.pop()) // the point to move
+	ref := it.pt(it.zp0, it.rp0)
+	p := it.pt(it.zp1, idx)
+	if it.err != nil {
+		return
+	}
+	if it.zp1 == 0 { // twilight point: seed it at the reference position
+		p.origX, p.origY = ref.origX, ref.origY
+		p.curX, p.curY = ref.curX, ref.curY
+	}
+	cur := it.project(p.curX-ref.curX, p.curY-ref.curY)
+	it.moveBy(p, float64(d)-cur)
+	it.rp1, it.rp2 = it.rp0, idx
+	if setRP0 {
+		it.rp0 = idx
+	}
+}
+
+// doISECT moves point p (zp2) to the intersection of line a0-a1 (zp1) and line
+// b0-b1 (zp0). Near-parallel lines fall back to the average of the endpoints.
+func (it *interp) doISECT() {
+	b1 := int(it.pop())
+	b0 := int(it.pop())
+	a1 := int(it.pop())
+	a0 := int(it.pop())
+	pIdx := int(it.pop())
+	pa0 := it.pt(it.zp1, a0)
+	pa1 := it.pt(it.zp1, a1)
+	pb0 := it.pt(it.zp0, b0)
+	pb1 := it.pt(it.zp0, b1)
+	p := it.pt(it.zp2, pIdx)
+	if it.err != nil {
+		return
+	}
+	dax, day := float64(pa1.curX-pa0.curX), float64(pa1.curY-pa0.curY)
+	dbx, dby := float64(pb1.curX-pb0.curX), float64(pb1.curY-pb0.curY)
+	dx, dy := float64(pb0.curX-pa0.curX), float64(pb0.curY-pa0.curY)
+	disc := day*dbx - dax*dby
+	dot := dax*dbx + day*dby
+	if math.Abs(disc)*19 > math.Abs(dot) {
+		t := (dy*dbx - dx*dby) / disc
+		p.curX = pa0.curX + int32(math.Round(t*dax))
+		p.curY = pa0.curY + int32(math.Round(t*day))
+	} else { // parallel (or coincident): use the endpoint average
+		p.curX = (pa0.curX + pa1.curX + pb0.curX + pb1.curX) / 4
+		p.curY = (pa0.curY + pa1.curY + pb0.curY + pb1.curY) / 4
+	}
+	p.tx, p.ty = true, true
+}
+
+// doALIGNPTS moves two points (p1 in zp1, p2 in zp0) to the midpoint of their
+// projected distance.
+func (it *interp) doALIGNPTS() {
+	p2i := int(it.pop()) // top operand, from zp0
+	p1i := int(it.pop()) // deeper operand, from zp1
+	p1 := it.pt(it.zp1, p1i)
+	p2 := it.pt(it.zp0, p2i)
+	if it.err != nil {
+		return
+	}
+	d := (it.project(p2.curX-p1.curX, p2.curY-p1.curY)) / 2
+	it.moveBy(p1, d)
+	it.moveBy(p2, -d)
+}
+
+// doUTP clears the touched flags of a point on the axes the freedom vector
+// spans, so a subsequent IUP will interpolate it again.
+func (it *interp) doUTP() {
+	idx := int(it.pop())
+	p := it.pt(it.zp0, idx)
+	if it.err != nil {
+		return
+	}
+	if it.fv.x != 0 {
+		p.tx = false
+	}
+	if it.fv.y != 0 {
+		p.ty = false
+	}
+}
+
+// shiftAmount returns the projected movement of the reference point selected by
+// the SHP/SHC/SHZ opcode bit (rp1 in zp0 when useRP1, else rp2 in zp1).
+func (it *interp) shiftAmount(useRP1 bool) (float64, int, int, bool) {
+	zp, rp := it.zp1, it.rp2
+	if useRP1 {
+		zp, rp = it.zp0, it.rp1
+	}
+	ref := it.pt(zp, rp)
+	if it.err != nil {
+		return 0, 0, 0, false
+	}
+	return it.project(ref.curX, ref.curY) - it.dualProject(ref.origX, ref.origY), zp, rp, true
+}
+
+// doSHC shifts every point of the (single) contour in zp2 by the reference
+// point's movement, leaving the reference point itself untouched. The contour
+// index is consumed but, per this interpreter's single-contour model, ignored.
+func (it *interp) doSHC(useRP1 bool) {
+	it.pop() // contour index (single-contour model: consumed, not used)
+	dp, zp, rp, ok := it.shiftAmount(useRP1)
+	if !ok {
+		return
+	}
+	z := it.zone(it.zp2)
+	for i := range z {
+		if it.zp2 == zp && i == rp {
+			continue // do not move the reference point twice
+		}
+		it.moveBy(&z[i], dp)
+	}
+}
+
+// doSHZ shifts every point of the zone named on the stack by the reference
+// point's movement.
+func (it *interp) doSHZ(useRP1 bool) {
+	e := int(it.pop())
+	dp, _, _, ok := it.shiftAmount(useRP1)
+	if !ok {
+		return
+	}
+	if e != 0 && e != 1 {
+		it.setErr(fmt.Errorf("opentype: hint: bad zone pointer %d", e))
+		return
+	}
+	z := it.zone(e)
+	for i := range z {
+		it.moveBy(&z[i], dp)
+	}
+}
+
+// doFLIPPT toggles the on/off-curve status of loop points read from the stack.
+func (it *interp) doFLIPPT() {
+	n := it.loop
+	it.loop = 1
+	for i := 0; i < n; i++ {
+		idx := int(it.pop())
+		p := it.pt(it.zp0, idx)
+		if it.err != nil {
+			return
+		}
+		p.on = !p.on
+	}
+}
+
+// doFlipRange sets the on-curve status of a contiguous point range in zp0.
+func (it *interp) doFlipRange(on bool) {
+	high := int(it.pop())
+	low := int(it.pop())
+	if it.err != nil {
+		return
+	}
+	z := it.zone(it.zp0)
+	if low < 0 || high >= len(z) || low > high {
+		it.setErr(fmt.Errorf("opentype: hint: flip range %d..%d out of range", low, high))
+		return
+	}
+	for i := low; i <= high; i++ {
+		z[i].on = on
+	}
+}
+
+// doINSTCTRL records the INSTCTRL grid-fit control flags. The selector chooses
+// which flag bit the value sets or clears; unknown selectors are ignored.
+func (it *interp) doINSTCTRL() {
+	sel := it.pop() // top operand: selector
+	val := it.pop() // deeper operand: value
+	if it.err != nil {
+		return
+	}
+	if sel >= 1 && sel <= 2 {
+		mask := int32(sel)
+		if val != 0 {
+			it.instructControl |= mask
+		} else {
+			it.instructControl &^= mask
+		}
+	}
 }
 
 // --- small numeric helpers --------------------------------------------------
