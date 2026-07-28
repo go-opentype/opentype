@@ -235,8 +235,8 @@ func buildPosRule(input []GlyphIndex, recs []plr) []byte {
 	return w.bytes()
 }
 
-// buildRuleSet wraps rule blobs (PosRule or ChainPosRule) into a *RuleSet table.
-func buildRuleSet(rules [][]byte) []byte {
+// buildPosRuleSet wraps rule blobs (PosRule or ChainPosRule) into a *RuleSet table.
+func buildPosRuleSet(rules [][]byte) []byte {
 	n := len(rules)
 	header := 2 + 2*n
 	body := &bw{}
@@ -302,7 +302,7 @@ func buildContextPos3(covs [][]byte, recs []plr) []byte {
 	return w.bytes()
 }
 
-func buildChainRule(back, input, ahead []GlyphIndex, recs []plr) []byte {
+func buildPosChainRule(back, input, ahead []GlyphIndex, recs []plr) []byte {
 	w := &bw{}
 	w.u16(uint16(len(back)))
 	for _, g := range back {
@@ -385,8 +385,8 @@ func mustSubtable(t *testing.T, lookupType uint16, b []byte) posSubtable {
 	return st
 }
 
-// applyOne parses a subtable and applies it once at index i over glyphs/advances.
-func applyOne(t *testing.T, lookupType uint16, b []byte, glyphs []GlyphIndex, advances []int, i int) (GlyphPosition, bool, []GlyphPosition) {
+// applyPosOne parses a subtable and applies it once at index i over glyphs/advances.
+func applyPosOne(t *testing.T, lookupType uint16, b []byte, glyphs []GlyphIndex, advances []int, i int) (GlyphPosition, bool, []GlyphPosition) {
 	t.Helper()
 	st := mustSubtable(t, lookupType, b)
 	pos := make([]GlyphPosition, len(glyphs))
@@ -415,12 +415,12 @@ func TestSinglePos1AllValueFields(t *testing.T) {
 	// and addValue.
 	const vf = uint16(0x00FF)
 	st := buildSinglePos1(buildCoverage1(7), vf, valueRecFull(vf, 3, 4, 5, 6))
-	got, ok, _ := applyOne(t, 1, st, []GlyphIndex{7}, nil, 0)
+	got, ok, _ := applyPosOne(t, 1, st, []GlyphIndex{7}, nil, 0)
 	if !ok || got != (GlyphPosition{XOffset: 3, YOffset: 4, XAdvance: 5, YAdvance: 6}) {
 		t.Fatalf("single1 = %+v ok=%v", got, ok)
 	}
 	// An uncovered glyph is left unchanged.
-	if _, ok, _ := applyOne(t, 1, st, []GlyphIndex{9}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 1, st, []GlyphIndex{9}, nil, 0); ok {
 		t.Error("single1 applied to uncovered glyph")
 	}
 }
@@ -431,15 +431,15 @@ func TestSinglePos2(t *testing.T) {
 		valueRecFull(vf, 0, 0, -20, 0),
 		valueRecFull(vf, 0, 0, -40, 0),
 	})
-	if got, ok, _ := applyOne(t, 1, st, []GlyphIndex{11}, nil, 0); !ok || got.XAdvance != -40 {
+	if got, ok, _ := applyPosOne(t, 1, st, []GlyphIndex{11}, nil, 0); !ok || got.XAdvance != -40 {
 		t.Errorf("single2 covered = %+v ok=%v", got, ok)
 	}
-	if _, ok, _ := applyOne(t, 1, st, []GlyphIndex{99}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 1, st, []GlyphIndex{99}, nil, 0); ok {
 		t.Error("single2 applied to uncovered glyph")
 	}
 	// Coverage index beyond the value array (malformed): guarded, no apply.
 	bad := buildSinglePos2(buildCoverage1(10, 11, 12), vf, [][]byte{valueRecFull(vf, 0, 0, -20, 0)})
-	if _, ok, _ := applyOne(t, 1, bad, []GlyphIndex{12}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 1, bad, []GlyphIndex{12}, nil, 0); ok {
 		t.Error("single2 applied with out-of-range coverage index")
 	}
 }
@@ -482,28 +482,28 @@ func TestCursivePos(t *testing.T) {
 		{entry: nil, exit: buildAnchor1(700, 10)},
 		{entry: buildAnchor1(0, 0), exit: nil},
 	})
-	_, ok, pos := applyOne(t, 3, st, []GlyphIndex{1, 2}, nil, 0)
+	_, ok, pos := applyPosOne(t, 3, st, []GlyphIndex{1, 2}, nil, 0)
 	if !ok || pos[1].XOffset != 700 || pos[1].YOffset != 10 {
 		t.Fatalf("cursive join pos=%+v ok=%v", pos, ok)
 	}
 	// First glyph not covered.
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{9, 2}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{9, 2}, nil, 0); ok {
 		t.Error("cursive applied with uncovered first glyph")
 	}
 	// No following glyph.
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{1}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{1}, nil, 0); ok {
 		t.Error("cursive applied at last glyph")
 	}
 	// Following glyph not covered.
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{1, 9}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{1, 9}, nil, 0); ok {
 		t.Error("cursive applied with uncovered second glyph")
 	}
 	// Exit anchor NULL on the first glyph (glyph 2 has no exit).
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{2, 1}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{2, 1}, nil, 0); ok {
 		t.Error("cursive applied with NULL exit anchor")
 	}
 	// Entry anchor NULL on the second glyph (glyph 1 has no entry).
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{1, 1}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{1, 1}, nil, 0); ok {
 		t.Error("cursive applied with NULL entry anchor")
 	}
 }
@@ -515,11 +515,11 @@ func TestCursivePosCoverageIndexOutOfRange(t *testing.T) {
 		{entry: buildAnchor1(0, 0), exit: buildAnchor1(1, 0)},
 	})
 	// ci = cov[6] = 1 >= len(exit)=1.
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{6, 5}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{6, 5}, nil, 0); ok {
 		t.Error("cursive applied with exit index out of range")
 	}
 	// ni = cov[6] = 1 >= len(entry)=1.
-	if _, ok, _ := applyOne(t, 3, st, []GlyphIndex{5, 6}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 3, st, []GlyphIndex{5, 6}, nil, 0); ok {
 		t.Error("cursive applied with entry index out of range")
 	}
 }
@@ -589,31 +589,31 @@ func baseMarkFixture(markClass uint16, baseAnchor []byte) []byte {
 func TestMarkBasePos(t *testing.T) {
 	st := baseMarkFixture(0, buildAnchor1(300, 600))
 	// Attach with advances: dx = 300-50 - advance(base)=500 -> -250; dy = 600.
-	_, ok, pos := applyOne(t, 4, st, []GlyphIndex{20, 10}, []int{500, 0}, 1)
+	_, ok, pos := applyPosOne(t, 4, st, []GlyphIndex{20, 10}, []int{500, 0}, 1)
 	if !ok || pos[1].XOffset != -250 || pos[1].YOffset != 600 {
 		t.Fatalf("markbase with advances pos=%+v ok=%v", pos, ok)
 	}
 	// Attach with nil advances: dx = 250, dy = 600.
-	_, ok, pos = applyOne(t, 4, st, []GlyphIndex{20, 10}, nil, 1)
+	_, ok, pos = applyPosOne(t, 4, st, []GlyphIndex{20, 10}, nil, 1)
 	if !ok || pos[1].XOffset != 250 || pos[1].YOffset != 600 {
 		t.Fatalf("markbase nil advances pos=%+v ok=%v", pos, ok)
 	}
 	// Mark glyph not covered.
-	if _, ok, _ := applyOne(t, 4, st, []GlyphIndex{20, 99}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 4, st, []GlyphIndex{20, 99}, nil, 1); ok {
 		t.Error("markbase applied to uncovered mark")
 	}
 	// No preceding base (mark first).
-	if _, ok, _ := applyOne(t, 4, st, []GlyphIndex{10}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 4, st, []GlyphIndex{10}, nil, 0); ok {
 		t.Error("markbase applied with no base")
 	}
 	// Null base anchor -> not applied.
 	stNull := baseMarkFixture(0, nil)
-	if _, ok, _ := applyOne(t, 4, stNull, []GlyphIndex{20, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 4, stNull, []GlyphIndex{20, 10}, nil, 1); ok {
 		t.Error("markbase applied with NULL base anchor")
 	}
 	// Mark class beyond the base record's columns.
 	stClass := baseMarkFixture(5, buildAnchor1(1, 1))
-	if _, ok, _ := applyOne(t, 4, stClass, []GlyphIndex{20, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 4, stClass, []GlyphIndex{20, 10}, nil, 1); ok {
 		t.Error("markbase applied with class out of range")
 	}
 }
@@ -624,12 +624,12 @@ func TestMarkBasePosIndexGuards(t *testing.T) {
 	markArr := buildMarkArray([]markSpec{{class: 0, anchor: buildAnchor1(50, 0)}})
 	baseArr := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(300, 600)}})
 	st := buildMarkPosSubtable(buildCoverage1(10, 11), buildCoverage1(20), 1, markArr, baseArr)
-	if _, ok, _ := applyOne(t, 4, st, []GlyphIndex{20, 11}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 4, st, []GlyphIndex{20, 11}, nil, 1); ok {
 		t.Error("markbase applied with mark index out of range")
 	}
 	// baseCov covers two glyphs but BaseArray has one row.
 	st2 := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(20, 21), 1, markArr, baseArr)
-	if _, ok, _ := applyOne(t, 4, st2, []GlyphIndex{21, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 4, st2, []GlyphIndex{21, 10}, nil, 1); ok {
 		t.Error("markbase applied with base index out of range")
 	}
 }
@@ -657,44 +657,44 @@ func TestMarkLigPos(t *testing.T) {
 	ligAttach := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(400, 700)}, {buildAnchor1(900, 700)}})
 	ligArr := buildLigatureArray([][]byte{ligAttach})
 	st := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(30), 1, markArr, ligArr)
-	_, ok, pos := applyOne(t, 5, st, []GlyphIndex{30, 10}, nil, 1)
+	_, ok, pos := applyPosOne(t, 5, st, []GlyphIndex{30, 10}, nil, 1)
 	if !ok || pos[1].XOffset != 400-50 || pos[1].YOffset != 700 {
 		t.Fatalf("marklig pos=%+v ok=%v", pos, ok)
 	}
 	// Mark not covered.
-	if _, ok, _ := applyOne(t, 5, st, []GlyphIndex{30, 99}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 5, st, []GlyphIndex{30, 99}, nil, 1); ok {
 		t.Error("marklig applied to uncovered mark")
 	}
 	// No ligature before the mark.
-	if _, ok, _ := applyOne(t, 5, st, []GlyphIndex{10}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 5, st, []GlyphIndex{10}, nil, 0); ok {
 		t.Error("marklig applied with no ligature")
 	}
 	// Ligature with zero components.
 	empty := buildLigatureArray([][]byte{buildAnchorMatrix(1, nil)})
 	stEmpty := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(30), 1, markArr, empty)
-	if _, ok, _ := applyOne(t, 5, stEmpty, []GlyphIndex{30, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 5, stEmpty, []GlyphIndex{30, 10}, nil, 1); ok {
 		t.Error("marklig applied with empty ligature")
 	}
 	// Class out of range.
 	markArr5 := buildMarkArray([]markSpec{{class: 5, anchor: buildAnchor1(50, 0)}})
 	stClass := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(30), 1, markArr5, ligArr)
-	if _, ok, _ := applyOne(t, 5, stClass, []GlyphIndex{30, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 5, stClass, []GlyphIndex{30, 10}, nil, 1); ok {
 		t.Error("marklig applied with class out of range")
 	}
 	// Null anchor in the component.
 	ligNull := buildLigatureArray([][]byte{buildAnchorMatrix(1, [][][]byte{{nil}})})
 	stNull := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(30), 1, markArr, ligNull)
-	if _, ok, _ := applyOne(t, 5, stNull, []GlyphIndex{30, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 5, stNull, []GlyphIndex{30, 10}, nil, 1); ok {
 		t.Error("marklig applied with NULL component anchor")
 	}
 	// Mark index out of range (two covered marks, one MarkArray record).
 	stMi := buildMarkPosSubtable(buildCoverage1(10, 11), buildCoverage1(30), 1, markArr, ligArr)
-	if _, ok, _ := applyOne(t, 5, stMi, []GlyphIndex{30, 11}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 5, stMi, []GlyphIndex{30, 11}, nil, 1); ok {
 		t.Error("marklig applied with mark index out of range")
 	}
 	// Ligature index out of range (two covered ligs, one LigatureArray entry).
 	stLi := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(30, 31), 1, markArr, ligArr)
-	if _, ok, _ := applyOne(t, 5, stLi, []GlyphIndex{31, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 5, stLi, []GlyphIndex{31, 10}, nil, 1); ok {
 		t.Error("marklig applied with ligature index out of range")
 	}
 }
@@ -730,35 +730,35 @@ func TestMarkMarkPos(t *testing.T) {
 	markArr := buildMarkArray([]markSpec{{class: 0, anchor: buildAnchor1(50, 0)}})
 	mark2Arr := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(60, 800)}})
 	st := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(12), 1, markArr, mark2Arr)
-	_, ok, pos := applyOne(t, 6, st, []GlyphIndex{12, 10}, nil, 1)
+	_, ok, pos := applyPosOne(t, 6, st, []GlyphIndex{12, 10}, nil, 1)
 	if !ok || pos[1].XOffset != 60-50 || pos[1].YOffset != 800 {
 		t.Fatalf("markmark pos=%+v ok=%v", pos, ok)
 	}
-	if _, ok, _ := applyOne(t, 6, st, []GlyphIndex{12, 99}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 6, st, []GlyphIndex{12, 99}, nil, 1); ok {
 		t.Error("markmark applied to uncovered mark")
 	}
-	if _, ok, _ := applyOne(t, 6, st, []GlyphIndex{10}, nil, 0); ok {
+	if _, ok, _ := applyPosOne(t, 6, st, []GlyphIndex{10}, nil, 0); ok {
 		t.Error("markmark applied with no base mark")
 	}
 	// Null mark2 anchor.
 	stNull := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(12), 1, markArr, buildAnchorMatrix(1, [][][]byte{{nil}}))
-	if _, ok, _ := applyOne(t, 6, stNull, []GlyphIndex{12, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 6, stNull, []GlyphIndex{12, 10}, nil, 1); ok {
 		t.Error("markmark applied with NULL anchor")
 	}
 	// mi out of range.
 	stMi := buildMarkPosSubtable(buildCoverage1(10, 11), buildCoverage1(12), 1, markArr, mark2Arr)
-	if _, ok, _ := applyOne(t, 6, stMi, []GlyphIndex{12, 11}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 6, stMi, []GlyphIndex{12, 11}, nil, 1); ok {
 		t.Error("markmark applied with mark index out of range")
 	}
 	// base mark index out of range.
 	stBi := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(12, 13), 1, markArr, mark2Arr)
-	if _, ok, _ := applyOne(t, 6, stBi, []GlyphIndex{13, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 6, stBi, []GlyphIndex{13, 10}, nil, 1); ok {
 		t.Error("markmark applied with base index out of range")
 	}
 	// class out of range.
 	markArr5 := buildMarkArray([]markSpec{{class: 5, anchor: buildAnchor1(50, 0)}})
 	stClass := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(12), 1, markArr5, mark2Arr)
-	if _, ok, _ := applyOne(t, 6, stClass, []GlyphIndex{12, 10}, nil, 1); ok {
+	if _, ok, _ := applyPosOne(t, 6, stClass, []GlyphIndex{12, 10}, nil, 1); ok {
 		t.Error("markmark applied with class out of range")
 	}
 }
@@ -806,7 +806,7 @@ func singleAdvLookup(g GlyphIndex, delta int16) []byte {
 func TestContextPos1(t *testing.T) {
 	// Context: covered glyph 1 followed by glyph 2 triggers lookup 1 at seq 0.
 	rule := buildPosRule([]GlyphIndex{2}, []plr{{seq: 0, lookup: 1}})
-	ctx := buildContextPos1(buildCoverage1(1), [][]byte{buildRuleSet([][]byte{rule})})
+	ctx := buildContextPos1(buildCoverage1(1), [][]byte{buildPosRuleSet([][]byte{rule})})
 	g := gposWith(t, "test", []uint16{0}, [][]byte{buildLookup(7, [][]byte{ctx}), singleAdvLookup(1, -30)})
 	pos := g.position([]GlyphIndex{1, 2}, nil, "test")
 	if pos[0].XAdvance != -30 {
@@ -826,7 +826,7 @@ func TestContextPos1CoverageIndexGuard(t *testing.T) {
 	// Coverage covers two glyphs but there is one rule set: the second glyph's
 	// coverage index runs past the sets slice.
 	rule := buildPosRule(nil, []plr{{seq: 0, lookup: 1}})
-	st := buildContextPos1(buildCoverage1(1, 2), [][]byte{buildRuleSet([][]byte{rule})})
+	st := buildContextPos1(buildCoverage1(1, 2), [][]byte{buildPosRuleSet([][]byte{rule})})
 	pt := mustSubtable(t, 7, st)
 	g := &gpos{lookups: []gposLookup{{}, {}}}
 	ctx := &posContext{g: g, glyphs: []GlyphIndex{2}, positions: make([]GlyphPosition, 1)}
@@ -876,13 +876,13 @@ func TestContextPosParseErrors(t *testing.T) {
 	if _, err := parseContextPos3([]byte{0, 3, 0, 1, 0, 0}); err == nil {
 		t.Error("contextpos3 truncated should error")
 	}
-	badCov1 := buildContextPos1(buildCoverage1(1), [][]byte{buildRuleSet([][]byte{buildPosRule(nil, nil)})})
+	badCov1 := buildContextPos1(buildCoverage1(1), [][]byte{buildPosRuleSet([][]byte{buildPosRule(nil, nil)})})
 	badCov1[2], badCov1[3] = 0xFF, 0xFF
 	if _, err := parseContextPos1(badCov1); err == nil {
 		t.Error("contextpos1 bad coverage should error")
 	}
 	// Bad rule-set offset (the first offset field sits at byte 6).
-	badSet1 := buildContextPos1(buildCoverage1(1), [][]byte{buildRuleSet([][]byte{buildPosRule(nil, nil)})})
+	badSet1 := buildContextPos1(buildCoverage1(1), [][]byte{buildPosRuleSet([][]byte{buildPosRule(nil, nil)})})
 	badSet1[6], badSet1[7] = 0xFF, 0xFF
 	if _, err := parseContextPos1(badSet1); err == nil {
 		t.Error("contextpos1 bad rule-set offset should error")
@@ -910,8 +910,8 @@ func TestContextPosParseErrors(t *testing.T) {
 
 func TestChainPos1(t *testing.T) {
 	// backtrack [1], input [2 (covered), 3], lookahead [4] -> run lookup 1 at 2.
-	rule := buildChainRule([]GlyphIndex{1}, []GlyphIndex{3}, []GlyphIndex{4}, []plr{{seq: 0, lookup: 1}})
-	st := buildContextPos1(buildCoverage1(2), [][]byte{buildRuleSet([][]byte{rule})})
+	rule := buildPosChainRule([]GlyphIndex{1}, []GlyphIndex{3}, []GlyphIndex{4}, []plr{{seq: 0, lookup: 1}})
+	st := buildContextPos1(buildCoverage1(2), [][]byte{buildPosRuleSet([][]byte{rule})})
 	g := gposWith(t, "test", []uint16{0}, [][]byte{buildLookup(8, [][]byte{st}), singleAdvLookup(2, -25)})
 	pos := g.position([]GlyphIndex{1, 2, 3, 4}, nil, "test")
 	if pos[1].XAdvance != -25 {
@@ -936,8 +936,8 @@ func TestChainPos1(t *testing.T) {
 }
 
 func TestChainPos1CoverageIndexGuard(t *testing.T) {
-	rule := buildChainRule(nil, nil, nil, []plr{{seq: 0, lookup: 1}})
-	st := buildContextPos1(buildCoverage1(1, 2), [][]byte{buildRuleSet([][]byte{rule})})
+	rule := buildPosChainRule(nil, nil, nil, []plr{{seq: 0, lookup: 1}})
+	st := buildContextPos1(buildCoverage1(1, 2), [][]byte{buildPosRuleSet([][]byte{rule})})
 	pt := mustSubtable(t, 8, st)
 	ctx := &posContext{g: &gpos{lookups: make([]gposLookup, 2)}, glyphs: []GlyphIndex{2}, positions: make([]GlyphPosition, 1)}
 	if pt.apply(ctx, 0) {
@@ -1006,13 +1006,13 @@ func TestChainPosParseErrors(t *testing.T) {
 	if _, err := parseChainPos3([]byte{0, 3, 0, 1, 0, 0}); err == nil {
 		t.Error("chainpos3 truncated should error")
 	}
-	badCov1 := buildContextPos1(buildCoverage1(1), [][]byte{buildRuleSet([][]byte{buildChainRule(nil, nil, nil, nil)})})
+	badCov1 := buildContextPos1(buildCoverage1(1), [][]byte{buildPosRuleSet([][]byte{buildPosChainRule(nil, nil, nil, nil)})})
 	badCov1[2], badCov1[3] = 0xFF, 0xFF
 	if _, err := parseChainPos1(badCov1); err == nil {
 		t.Error("chainpos1 bad coverage should error")
 	}
 	// Bad rule-set offset (first offset field at byte 6).
-	badSet1 := buildContextPos1(buildCoverage1(1), [][]byte{buildRuleSet([][]byte{buildChainRule(nil, nil, nil, nil)})})
+	badSet1 := buildContextPos1(buildCoverage1(1), [][]byte{buildPosRuleSet([][]byte{buildPosChainRule(nil, nil, nil, nil)})})
 	badSet1[6], badSet1[7] = 0xFF, 0xFF
 	if _, err := parseChainPos1(badSet1); err == nil {
 		t.Error("chainpos1 bad rule-set offset should error")
@@ -1038,13 +1038,13 @@ func TestChainPosParseErrors(t *testing.T) {
 		}
 	}
 	// ChainPosRuleSet / ChainPosRule truncations.
-	if _, err := parseChainRuleSet([]byte{0, 1}); err == nil {
+	if _, err := parsePosChainRuleSet([]byte{0, 1}); err == nil {
 		t.Error("truncated chainRuleSet should error")
 	}
-	if _, err := parseChainRuleSet([]byte{0, 1, 0xFF, 0xFF}); err == nil {
+	if _, err := parsePosChainRuleSet([]byte{0, 1, 0xFF, 0xFF}); err == nil {
 		t.Error("chainRuleSet bad offset should error")
 	}
-	if _, err := parseChainRule([]byte{0, 1}); err == nil {
+	if _, err := parsePosChainRule([]byte{0, 1}); err == nil {
 		t.Error("truncated chainRule should error")
 	}
 }
@@ -1069,7 +1069,7 @@ func headerOffsetOfFirstCov(back, input, ahead [][]byte) int {
 func TestExtensionPos(t *testing.T) {
 	inner := buildSinglePos1(buildCoverage1(7), vfXAdvance, valueRecFull(vfXAdvance, 0, 0, -33, 0))
 	ext := buildExtensionPos(1, inner) // extensionLookupType 1 (single pos)
-	got, ok, _ := applyOne(t, 9, ext, []GlyphIndex{7}, nil, 0)
+	got, ok, _ := applyPosOne(t, 9, ext, []GlyphIndex{7}, nil, 0)
 	if !ok || got.XAdvance != -33 {
 		t.Fatalf("extension pos = %+v ok=%v", got, ok)
 	}
@@ -1245,16 +1245,16 @@ func TestMarkScanSkipsNonBase(t *testing.T) {
 	baseArr := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(300, 600)}})
 
 	mb := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(20), 1, markArr, baseArr)
-	if _, ok, _ := applyOne(t, 4, mb, []GlyphIndex{20, 99, 10}, nil, 2); !ok {
+	if _, ok, _ := applyPosOne(t, 4, mb, []GlyphIndex{20, 99, 10}, nil, 2); !ok {
 		t.Error("markbase should skip the filler glyph and attach")
 	}
 	ligArr := buildLigatureArray([][]byte{buildAnchorMatrix(1, [][][]byte{{buildAnchor1(300, 600)}})})
 	ml := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(30), 1, markArr, ligArr)
-	if _, ok, _ := applyOne(t, 5, ml, []GlyphIndex{30, 99, 10}, nil, 2); !ok {
+	if _, ok, _ := applyPosOne(t, 5, ml, []GlyphIndex{30, 99, 10}, nil, 2); !ok {
 		t.Error("marklig should skip the filler glyph and attach")
 	}
 	mm := buildMarkPosSubtable(buildCoverage1(10), buildCoverage1(12), 1, markArr, baseArr)
-	if _, ok, _ := applyOne(t, 6, mm, []GlyphIndex{12, 99, 10}, nil, 2); !ok {
+	if _, ok, _ := applyPosOne(t, 6, mm, []GlyphIndex{12, 99, 10}, nil, 2); !ok {
 		t.Error("markmark should skip the filler glyph and attach")
 	}
 }
