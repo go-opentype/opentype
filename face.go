@@ -59,6 +59,16 @@ func (f *Font) NewFace(sizePx int) *Face {
 	}
 }
 
+// Font returns the Font this Face renders. It lets a shaper reach the font's
+// layout tables ([Font.GSUB], [Font.GPOS]) and per-glyph metrics
+// ([Font.GlyphAdvance]) while keeping the Face for pixel sizing.
+func (fc *Face) Font() *Font { return fc.font }
+
+// Scale returns the face's font-unit-to-pixel scale factor (the render size in
+// pixels divided by the font's unitsPerEm). A shaper multiplies a font-unit
+// advance or offset by it to obtain whole pixels at the face's size.
+func (fc *Face) Scale() float64 { return fc.scale }
+
 // Metrics returns the face's vertical metrics in pixels.
 func (fc *Face) Metrics() Metrics {
 	s := fc.scale
