@@ -18,17 +18,18 @@ import (
 //   - Type 4: mark-to-base attachment (diacritics on a base glyph).
 //   - Type 5: mark-to-ligature attachment.
 //   - Type 6: mark-to-mark attachment (stacked diacritics).
-//   - Type 7: contextual positioning (formats 1 and 3).
-//   - Type 8: chaining contextual positioning (formats 1 and 3).
+//   - Type 7: contextual positioning (formats 1, 2 and 3).
+//   - Type 8: chaining contextual positioning (formats 1, 2 and 3).
 //   - Type 9: extension positioning (indirection to another lookup type).
 //
 // Anchor tables in formats 1, 2 and 3 are decoded; the anchor-point index of
 // format 2 and the Device/VariationIndex offsets of format 3 are tolerated and
 // ignored (their contribution is a hinting/variation refinement).
 //
-// The class-based contextual sub-format (format 2 of types 7 and 8) is
-// deliberately deferred: such a subtable is parsed as a no-op and dropped. All
-// other sub-formats are implemented.
+// The class-based contextual sub-format (format 2 of types 7 and 8) classifies
+// the glyph run through ClassDef tables and matches rules by class sequence,
+// mirroring the class-based GSUB contextual/chaining subtables. Every
+// sub-format is implemented.
 //
 // Two entry points are exposed for the package's Face API to call: Kern (and
 // Kerner.Kerning) for horizontal pair kerning, and position, which applies the
@@ -892,6 +893,34 @@ func matchBacktrack(glyphs []GlyphIndex, i int, back []GlyphIndex) bool {
 	return true
 }
 
+// matchClasses reports whether the classes of glyphs[start+k] equal seq[k] for
+// all k (bounds checked). The class sequence is stored with the on-disk
+// glyph-index-typed class values of a Pos(Chain)ClassRule, so glyphs absent
+// from cd fall in class 0.
+func matchClasses(glyphs []GlyphIndex, start int, seq []GlyphIndex, cd map[GlyphIndex]int) bool {
+	if start < 0 || start+len(seq) > len(glyphs) {
+		return false
+	}
+	for k, c := range seq {
+		if classOf(cd, glyphs[start+k]) != int(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchBacktrackClasses reports whether the backtrack class sequence matches the
+// classes of the glyphs preceding index i (seq[k] against glyphs[i-1-k]).
+func matchBacktrackClasses(glyphs []GlyphIndex, i int, seq []GlyphIndex, cd map[GlyphIndex]int) bool {
+	for k, c := range seq {
+		j := i - 1 - k
+		if j < 0 || classOf(cd, glyphs[j]) != int(c) {
+			return false
+		}
+	}
+	return true
+}
+
 // posRule is one contextual (type 7 format 1) rule: an input sequence (from the
 // second glyph) and the lookup records to run when it matches.
 type posRule struct {
@@ -905,6 +934,16 @@ type contextPos1 struct {
 	sets [][]posRule
 }
 
+// contextPos2 is a contextual positioning format 2 subtable (class based): the
+// first glyph must be covered, then the input run is matched by glyph class.
+// sets is indexed by the first glyph's class; a nil set is empty (a NULL
+// PosClassSet offset, common for class 0).
+type contextPos2 struct {
+	cov      map[GlyphIndex]int
+	classDef map[GlyphIndex]int
+	sets     [][]posRule
+}
+
 // contextPos3 is a contextual positioning format 3 subtable: a per-position
 // coverage sequence and the lookup records to run on a full match.
 type contextPos3 struct {
@@ -912,8 +951,7 @@ type contextPos3 struct {
 	recs []posLookupRecord
 }
 
-// parseContextPos decodes a contextual positioning subtable. Format 2 (class
-// based) is deferred and yields a nil subtable.
+// parseContextPos decodes a contextual positioning subtable (format 1, 2 or 3).
 func parseContextPos(b []byte) (posSubtable, error) {
 	r := reader{b: b}
 	format := r.u16()
@@ -923,13 +961,66 @@ func parseContextPos(b []byte) (posSubtable, error) {
 	switch format {
 	case 1:
 		return parseContextPos1(b)
+	case 2:
+		return parseContextPos2(b)
 	case 3:
 		return parseContextPos3(b)
-	case 2:
-		return nil, nil // class-based contextual positioning deferred (documented)
 	default:
 		return nil, fmt.Errorf("opentype: contextpos format %d", format)
 	}
+}
+
+// parseContextPos2 decodes a contextual positioning format 2 subtable.
+func parseContextPos2(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	covOff := int(r.u16())
+	classOff := int(r.u16())
+	n := int(r.u16())
+	setOffs := make([]int, n)
+	for i := 0; i < n; i++ {
+		setOffs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: contextpos2: %w", r.err)
+	}
+	cov, err := parseCoverage(subslice(b, covOff))
+	if err != nil {
+		return nil, err
+	}
+	cd, err := parseClassDef(subslice(b, classOff))
+	if err != nil {
+		return nil, err
+	}
+	sets := make([][]posRule, n)
+	for i, so := range setOffs {
+		if so == 0 {
+			continue // NULL PosClassSet: this class triggers no rule
+		}
+		rs, err := parsePosRuleSet(subslice(b, so))
+		if err != nil {
+			return nil, err
+		}
+		sets[i] = rs
+	}
+	return &contextPos2{cov: cov, classDef: cd, sets: sets}, nil
+}
+
+func (c *contextPos2) apply(ctx *posContext, i int) bool {
+	if _, ok := c.cov[ctx.glyphs[i]]; !ok {
+		return false
+	}
+	cls := classOf(c.classDef, ctx.glyphs[i])
+	if cls >= len(c.sets) {
+		return false
+	}
+	for _, rule := range c.sets[cls] {
+		if matchClasses(ctx.glyphs, i+1, rule.input, c.classDef) {
+			ctx.applyRecords(rule.recs, i)
+			return true
+		}
+	}
+	return false
 }
 
 // parseContextPos1 decodes a contextual positioning format 1 subtable.
@@ -1078,6 +1169,18 @@ type chainPos1 struct {
 	sets [][]posChainRule
 }
 
+// chainPos2 is a chaining contextual positioning format 2 subtable (class
+// based): three ClassDefs classify the backtrack, input and lookahead runs, and
+// rules match by class sequence. sets is indexed by the first glyph's input
+// class; a nil set is empty (a NULL ChainPosClassSet offset).
+type chainPos2 struct {
+	cov       map[GlyphIndex]int
+	backtrack map[GlyphIndex]int
+	input     map[GlyphIndex]int
+	lookahead map[GlyphIndex]int
+	sets      [][]posChainRule
+}
+
 // chainPos3 is a chaining contextual positioning format 3 subtable.
 type chainPos3 struct {
 	back  []map[GlyphIndex]int
@@ -1086,8 +1189,8 @@ type chainPos3 struct {
 	recs  []posLookupRecord
 }
 
-// parseChainPos decodes a chaining contextual positioning subtable. Format 2
-// (class based) is deferred and yields a nil subtable.
+// parseChainPos decodes a chaining contextual positioning subtable (format 1, 2
+// or 3).
 func parseChainPos(b []byte) (posSubtable, error) {
 	r := reader{b: b}
 	format := r.u16()
@@ -1097,13 +1200,78 @@ func parseChainPos(b []byte) (posSubtable, error) {
 	switch format {
 	case 1:
 		return parseChainPos1(b)
+	case 2:
+		return parseChainPos2(b)
 	case 3:
 		return parseChainPos3(b)
-	case 2:
-		return nil, nil // class-based chaining positioning deferred (documented)
 	default:
 		return nil, fmt.Errorf("opentype: chainpos format %d", format)
 	}
+}
+
+// parseChainPos2 decodes a chaining contextual positioning format 2 subtable.
+func parseChainPos2(b []byte) (posSubtable, error) {
+	r := reader{b: b}
+	r.skip(2) // posFormat
+	covOff := int(r.u16())
+	btOff := int(r.u16())
+	inOff := int(r.u16())
+	laOff := int(r.u16())
+	n := int(r.u16())
+	setOffs := make([]int, n)
+	for i := 0; i < n; i++ {
+		setOffs[i] = int(r.u16())
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: chainpos2: %w", r.err)
+	}
+	cov, err := parseCoverage(subslice(b, covOff))
+	if err != nil {
+		return nil, err
+	}
+	btCD, err := parseClassDef(subslice(b, btOff))
+	if err != nil {
+		return nil, err
+	}
+	inCD, err := parseClassDef(subslice(b, inOff))
+	if err != nil {
+		return nil, err
+	}
+	laCD, err := parseClassDef(subslice(b, laOff))
+	if err != nil {
+		return nil, err
+	}
+	sets := make([][]posChainRule, n)
+	for i, so := range setOffs {
+		if so == 0 {
+			continue // NULL ChainPosClassSet: this class triggers no rule
+		}
+		rs, err := parsePosChainRuleSet(subslice(b, so))
+		if err != nil {
+			return nil, err
+		}
+		sets[i] = rs
+	}
+	return &chainPos2{cov: cov, backtrack: btCD, input: inCD, lookahead: laCD, sets: sets}, nil
+}
+
+func (c *chainPos2) apply(ctx *posContext, i int) bool {
+	if _, ok := c.cov[ctx.glyphs[i]]; !ok {
+		return false
+	}
+	cls := classOf(c.input, ctx.glyphs[i])
+	if cls >= len(c.sets) {
+		return false
+	}
+	for _, rule := range c.sets[cls] {
+		if matchBacktrackClasses(ctx.glyphs, i, rule.back, c.backtrack) &&
+			matchClasses(ctx.glyphs, i+1, rule.input, c.input) &&
+			matchClasses(ctx.glyphs, i+1+len(rule.input), rule.ahead, c.lookahead) {
+			ctx.applyRecords(rule.recs, i)
+			return true
+		}
+	}
+	return false
 }
 
 // parseChainPos1 decodes a chaining contextual positioning format 1 subtable.
