@@ -110,7 +110,7 @@ func (g *gsub) applyMasked(glyphs []GlyphIndex, clusters []int, feats []FeatureA
 		return glyphs, clusters
 	}
 	out := append([]GlyphIndex(nil), glyphs...)
-	a := &gsubApplier{lookups: g.lookups}
+	a := &gsubApplier{lookups: g.lookups, gdef: g.gdef}
 	if clusters != nil {
 		a.clusters = append([]int(nil), clusters...)
 	}
@@ -135,7 +135,8 @@ func (a *gsubApplier) applyLookupMasked(lk gsubLookup, glyphs []GlyphIndex, mask
 	if mask == nil {
 		return a.applyLookup(lk, glyphs)
 	}
-	masked := func(i int) bool { return i < len(mask) && mask[i] }
+	a.skip = a.skipperFor(lk)
+	masked := func(i int) bool { return i < len(mask) && mask[i] && !a.skip.skip(glyphs[i]) }
 	if lk.reverse {
 		for i := len(glyphs) - 1; i >= 0; i-- {
 			if !masked(i) {
