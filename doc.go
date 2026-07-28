@@ -19,6 +19,12 @@
 // shaping, kerning and hinting are not implemented; see the README for the
 // full support matrix.
 //
+// The OpenType MATH table (math-typesetting metrics: constants, per-glyph
+// italic correction and kerning, and stretchy-glyph size variants and
+// assemblies) is decoded and exposed pixel-scaled through a Face; see
+// [Font.HasMath] and math.go. Math layout itself (box building, the TeX math
+// rules) is a higher-level engine that consumes these values.
+//
 // # Usage
 //
 //	f, err := opentype.Parse(ttf)
