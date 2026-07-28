@@ -542,6 +542,36 @@ func TestParseErrors(t *testing.T) {
 			tb["cmap"] = cmapTable([][]byte{sub[:len(sub)-1]})
 			return assemble(versionTrueType, tb)
 		}, "cmap format 6"},
+		{"cmap8 is32 truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap8Bytes([][3]uint32{{0x41, 0x43, 1}})
+			tb["cmap"] = cmapTable([][]byte{sub[:12+100]}) // cut deep inside the 8192-byte is32 array
+			return assemble(versionTrueType, tb)
+		}, "cmap format 8 is32"},
+		{"cmap8 header truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap8Bytes([][3]uint32{{0x41, 0x43, 1}})
+			tb["cmap"] = cmapTable([][]byte{sub[:12+8192+2]}) // is32 complete, numGroups cut short
+			return assemble(versionTrueType, tb)
+		}, "cmap format 8 header"},
+		{"cmap8 groups truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap8Bytes([][3]uint32{{0x41, 0x43, 1}})
+			tb["cmap"] = cmapTable([][]byte{sub[:12+8192+4+8]}) // numGroups=1, one group cut short
+			return assemble(versionTrueType, tb)
+		}, "cmap format 8 groups"},
+		{"cmap10 header truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap10Bytes(0x41, []uint16{1, 2, 3})
+			tb["cmap"] = cmapTable([][]byte{sub[:14]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 10 header"},
+		{"cmap10 array truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap10Bytes(0x41, []uint16{1, 2, 3})
+			tb["cmap"] = cmapTable([][]byte{sub[:len(sub)-1]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 10"},
 		{"cmap2 keys truncated", func() []byte {
 			tb := stdTables(false, false)
 			var keys [256]uint16
@@ -687,6 +717,100 @@ func TestCmap13Lookup(t *testing.T) {
 		g, ok := f.GlyphIndex(c.r)
 		if ok != c.ok || (ok && g != c.want) {
 			t.Errorf("cmap13 lookup %#x = (%d,%v) want (%d,%v)", c.r, g, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestCmap8Lookup(t *testing.T) {
+	tb := stdTables(false, false)
+	// A low group and a high (astral) group, mirroring format 12's group
+	// semantics but framed by format 8's is32 bitmap + mixed 16/32-bit header.
+	tb["cmap"] = cmapTable([][]byte{cmap8Bytes([][3]uint32{{0x41, 0x43, 1}, {0x1F600, 0x1F601, 10}})})
+	f := mustParse(t, assemble(versionTrueType, tb))
+	cases := []struct {
+		r    rune
+		want GlyphIndex
+		ok   bool
+	}{
+		{0x41, 1, true},      // start of the first group
+		{0x43, 3, true},      // end of the first group, advancing per code point
+		{0x1F600, 10, true},  // start of the high (astral) group
+		{0x1F601, 11, true},  // end of the high group
+		{0x40, 0, false},     // below all groups
+		{0x44, 0, false},     // gap between groups
+		{0x10FFFF, 0, false}, // above all groups
+	}
+	for _, c := range cases {
+		g, ok := f.GlyphIndex(c.r)
+		if ok != c.ok || (ok && g != c.want) {
+			t.Errorf("cmap8 lookup %#x = (%d,%v) want (%d,%v)", c.r, g, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestCmap10Lookup(t *testing.T) {
+	// Range starting at an astral code point 0x1F600..0x1F602 -> glyphs {1,0,2}.
+	f := cmapOnlyFont(t, [][]byte{cmap10Bytes(0x1F600, []uint16{1, 0, 2})})
+
+	if _, ok := f.GlyphIndex(0x1F5FF); ok { // below startCharCode
+		t.Errorf("0x1F5FF below range, want unmapped")
+	}
+	if gid, ok := f.GlyphIndex(0x1F600); !ok || gid != 1 {
+		t.Errorf("0x1F600 -> %d,%v want 1,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x1F601); ok { // entry 0 -> unmapped
+		t.Errorf("0x1F601 maps to glyph 0, want unmapped")
+	}
+	if gid, ok := f.GlyphIndex(0x1F602); !ok || gid != 2 {
+		t.Errorf("0x1F602 -> %d,%v want 2,true", gid, ok)
+	}
+	if _, ok := f.GlyphIndex(0x1F603); ok { // past the last entry
+		t.Errorf("0x1F603 past range, want unmapped")
+	}
+}
+
+func TestCmap10Empty(t *testing.T) {
+	// An empty trimmed range: every lookup falls out via the length check.
+	f := cmapOnlyFont(t, [][]byte{cmap10Bytes(0x1F600, nil), cmap0Bytes([256]byte{})})
+	if _, ok := f.GlyphIndex(0x1F600); ok {
+		t.Errorf("empty format-10 range: 0x1F600 should be unmapped")
+	}
+}
+
+func TestCmapPreferFormat10Over8(t *testing.T) {
+	for _, order := range [][][]byte{
+		{cmap8Bytes([][3]uint32{{0x41, 0x41, 1}}), cmap10Bytes(0x41, []uint16{2})},
+		{cmap10Bytes(0x41, []uint16{2}), cmap8Bytes([][3]uint32{{0x41, 0x41, 1}})},
+	} {
+		f := cmapOnlyFont(t, order)
+		if gid, ok := f.GlyphIndex(0x41); !ok || gid != 2 {
+			t.Errorf("format 10 should be selected over 8: 0x41 -> %d,%v want 2,true", gid, ok)
+		}
+	}
+}
+
+func TestCmapPreferFormat8Over4(t *testing.T) {
+	for _, order := range [][][]byte{
+		{cmap4FromMap(map[rune]uint16{0x41: 1}), cmap8Bytes([][3]uint32{{0x41, 0x41, 2}})},
+		{cmap8Bytes([][3]uint32{{0x41, 0x41, 2}}), cmap4FromMap(map[rune]uint16{0x41: 1})},
+	} {
+		f := cmapOnlyFont(t, order)
+		if gid, ok := f.GlyphIndex(0x41); !ok || gid != 2 {
+			t.Errorf("format 8 should be selected over 4: 0x41 -> %d,%v want 2,true", gid, ok)
+		}
+	}
+}
+
+func TestCmapPreferFormat12Over10(t *testing.T) {
+	for _, order := range [][][]byte{
+		{cmap10Bytes(0x41, []uint16{1}), cmap12FromMap(std12Map())},
+		{cmap12FromMap(std12Map()), cmap10Bytes(0x41, []uint16{1})},
+	} {
+		tb := stdTables(false, false)
+		tb["cmap"] = cmapTable(order)
+		f := mustParse(t, assemble(versionTrueType, tb))
+		if _, ok := f.GlyphIndex(0x1F600); !ok {
+			t.Errorf("format 12 should be selected (astral rune mappable)")
 		}
 	}
 }
