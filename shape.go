@@ -27,6 +27,73 @@ func (fc *Face) Shape(text string, features ...string) []GlyphIndex {
 	return glyphs
 }
 
+// PositionedGlyph is one glyph of a positioned run produced by ShapePositioned:
+// the glyph to draw, the pen-relative placement offsets (XOffset, YOffset) GPOS
+// assigned it (a non-zero YOffset lifts an attached diacritic onto its base),
+// and the advance to move the pen by afterwards, all in whole pixels at the
+// face's size.
+type PositionedGlyph struct {
+	Glyph    GlyphIndex
+	XOffset  int
+	YOffset  int
+	XAdvance int
+}
+
+// defaultPosFeatures are the GPOS features ShapePositioned always activates in
+// addition to any the caller requests: pair/positional kerning ("kern"),
+// mark-to-base/ligature attachment ("mark") and mark-to-mark stacking ("mkmk").
+var defaultPosFeatures = []string{"kern", "mark", "mkmk"}
+
+// ShapePositioned maps text to a fully positioned glyph run: each rune maps
+// through the cmap (an unmapped rune becomes glyph 0), the requested GSUB
+// features are applied (ligatures, contextual substitution, ...), then GPOS
+// positions the resulting glyphs — pair kerning, single/cursive adjustment and
+// mark attachment (types 4/5/6 pull diacritics onto their base). The positioning
+// features are the caller's features plus the always-on kern/mark/mkmk set.
+//
+// The result has one PositionedGlyph per output glyph, with placement and
+// advance in whole pixels at the face's size. A font lacking GSUB or GPOS simply
+// skips that stage; with neither the run is the plain cmap mapping at its
+// unadjusted advances.
+func (fc *Face) ShapePositioned(text string, features ...string) []PositionedGlyph {
+	var glyphs []GlyphIndex
+	for _, r := range text {
+		gid, _ := fc.font.GlyphIndex(r) // unmapped -> 0 (.notdef)
+		glyphs = append(glyphs, gid)
+	}
+	if fc.font.gsub != nil {
+		glyphs = fc.font.gsub.Apply(glyphs, features...)
+	}
+	// Base horizontal advances in font units, indexed by glyph, feed both the
+	// mark-attachment pull-back and the final per-glyph advance.
+	advances := make([]int, len(glyphs))
+	for i, g := range glyphs {
+		advances[i] = fc.font.advances[g]
+	}
+	var positions []GlyphPosition
+	if fc.font.gpos != nil {
+		posFeatures := append(append([]string(nil), features...), defaultPosFeatures...)
+		positions = fc.font.gpos.position(glyphs, advances, posFeatures...)
+	}
+	out := make([]PositionedGlyph, len(glyphs))
+	for i, g := range glyphs {
+		adv := advances[i]
+		var xOff, yOff int
+		if positions != nil {
+			xOff = positions[i].XOffset
+			yOff = positions[i].YOffset
+			adv += positions[i].XAdvance
+		}
+		out[i] = PositionedGlyph{
+			Glyph:    g,
+			XOffset:  roundInt(float64(xOff) * fc.scale),
+			YOffset:  roundInt(float64(yOff) * fc.scale),
+			XAdvance: roundInt(float64(adv) * fc.scale),
+		}
+	}
+	return out
+}
+
 // Kern returns the horizontal kerning adjustment between the consecutive runes
 // prev and r, in whole pixels at the face's size. GPOS pair positioning is
 // preferred; the legacy kern table is used as a fallback. It is zero when either

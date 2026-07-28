@@ -36,6 +36,7 @@ type Font struct {
 	cmap             cmapLookup
 	cmapVS           *cmap14    // format-14 Unicode Variation Sequences subtable, if present
 	cff              *cffTable  // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
+	cff2             *cff2Table // CFF2 (variable Compact Font Format) outlines, if present
 	fvar             *fvarTable // optional: variation axes and named instances
 	avar             *avarTable // optional: axis-value segment maps
 	gvar             *gvarTable // optional: glyph variation (delta) data
@@ -91,9 +92,10 @@ const (
 // slice is retained (not copied) and must not be mutated by the caller.
 //
 // It fails on a corrupt or unsupported container: a bad sfnt magic, truncated
-// data, or a missing required table. Both outline flavours are supported:
-// TrueType ('glyf'/'loca') and CFF/OpenType (a "OTTO" sfnt, or any sfnt
-// carrying a 'CFF ' table), the latter decoded via cff.go.
+// data, or a missing required table. All three outline flavours are supported:
+// TrueType ('glyf'/'loca'), CFF/OpenType (a "OTTO" sfnt, or any sfnt carrying a
+// 'CFF ' table, decoded via cff.go) and variable CFF2 (a sfnt carrying a 'CFF2'
+// table, decoded via cff2.go).
 func Parse(b []byte) (*Font, error) {
 	if len(b) < 12 {
 		return nil, fmt.Errorf("opentype: short header: %w", errTruncated)
@@ -123,15 +125,20 @@ func Parse(b []byte) (*Font, error) {
 		tables[tag] = b[off : off+length]
 	}
 
-	// The outline flavour is CFF when the sfnt is "OTTO" or carries a 'CFF '
-	// table; such a font needs 'CFF ' but not 'glyf'/'loca'. A TrueType font
-	// needs 'glyf'/'loca' but not 'CFF '.
+	// The outline flavour is CFF/CFF2 when the sfnt is "OTTO" or carries a 'CFF '
+	// or 'CFF2' table; such a font needs its CFF table but not 'glyf'/'loca'. A
+	// 'CFF2' table (variable CFF) takes precedence and requires 'CFF2'; otherwise
+	// a CFF font requires 'CFF '. A TrueType font needs 'glyf'/'loca'.
 	_, hasCFF := tables["CFF "]
-	isCFF := version == versionOTTO || hasCFF
+	_, hasCFF2 := tables["CFF2"]
+	isCFF := version == versionOTTO || hasCFF || hasCFF2
 	required := []string{"head", "maxp", "hhea", "hmtx", "cmap"}
-	if isCFF {
+	switch {
+	case hasCFF2:
+		required = append(required, "CFF2")
+	case isCFF:
 		required = append(required, "CFF ")
-	} else {
+	default:
 		required = append(required, "loca", "glyf")
 	}
 	for _, name := range required {
@@ -153,13 +160,20 @@ func Parse(b []byte) (*Font, error) {
 	if err := f.parseHmtx(tables["hmtx"]); err != nil {
 		return nil, err
 	}
-	if isCFF {
+	switch {
+	case hasCFF2:
+		c2, err := parseCFF2(tables["CFF2"])
+		if err != nil {
+			return nil, err
+		}
+		f.cff2 = c2
+	case isCFF:
 		cff, err := parseCFF(tables["CFF "])
 		if err != nil {
 			return nil, err
 		}
 		f.cff = cff
-	} else {
+	default:
 		if err := f.parseLoca(tables["loca"]); err != nil {
 			return nil, err
 		}
