@@ -50,6 +50,10 @@ type Font struct {
 	gpos *gpos      // glyph positioning (pair kerning)
 	kern *kern      // legacy kern table (kerning fallback)
 
+	// OpenType MATH table (math-typesetting metrics), optional. Absence is not an
+	// error; it powers Font.HasMath and the Face math accessors (see math.go).
+	math *mathTable
+
 	// Vertical writing-mode metrics (vhea/vmtx/VORG), all optional. They enable
 	// top-to-bottom (CJK tategaki) layout; absence means vertical metrics are
 	// unavailable. See vertical.go.
@@ -212,6 +216,11 @@ func Parse(b []byte) (*Font, error) {
 	// Optional vertical writing-mode tables (vhea, vmtx, VORG). Absence is not an
 	// error; they supply the metrics for top-to-bottom layout (see vertical.go).
 	if err := f.parseVertical(tables); err != nil {
+		return nil, err
+	}
+	// Optional OpenType MATH table: the font-level metrics a math-typesetting
+	// engine consumes. Absence is not an error (see math.go).
+	if err := f.parseMath(tables); err != nil {
 		return nil, err
 	}
 	return f, nil
