@@ -511,6 +511,18 @@ func TestParseErrors(t *testing.T) {
 			tb["cmap"] = cmapTable([][]byte{sub[:16]})
 			return assemble(versionTrueType, tb)
 		}, "cmap format 12 groups"},
+		{"cmap13 header truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap13Bytes([][3]uint32{{0x41, 0x43, 1}})
+			tb["cmap"] = cmapTable([][]byte{sub[:8]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 13 header"},
+		{"cmap13 groups truncated", func() []byte {
+			tb := stdTables(false, false)
+			sub := cmap13Bytes([][3]uint32{{0x41, 0x43, 1}})
+			tb["cmap"] = cmapTable([][]byte{sub[:16]})
+			return assemble(versionTrueType, tb)
+		}, "cmap format 13 groups"},
 		{"cmap0 truncated", func() []byte {
 			tb := stdTables(false, false)
 			var arr [256]byte
@@ -648,6 +660,33 @@ func TestCmap12Lookup(t *testing.T) {
 	for _, c := range cases {
 		if _, ok := f.GlyphIndex(c.r); ok != c.want {
 			t.Errorf("cmap12 lookup %#x = %v want %v", c.r, ok, c.want)
+		}
+	}
+}
+
+func TestCmap13Lookup(t *testing.T) {
+	tb := stdTables(false, false)
+	// Two constant-map groups: 0x41..0x43 all map to glyph 1; a high fallback
+	// block 0xF0000..0xF00FF collapses onto a single glyph 2 (the format-13
+	// LastResort/fallback use case).
+	tb["cmap"] = cmapTable([][]byte{cmap13Bytes([][3]uint32{{0x41, 0x43, 1}, {0xF0000, 0xF00FF, 2}})})
+	f := mustParse(t, assemble(versionTrueType, tb))
+	cases := []struct {
+		r    rune
+		want GlyphIndex
+		ok   bool
+	}{
+		{'A', 1, true},       // start of the first group
+		{'C', 1, true},       // constant glyph across the whole range
+		{0xF0050, 2, true},   // constant glyph in the high fallback block
+		{0x40, 0, false},     // below all groups
+		{0x44, 0, false},     // gap between groups
+		{0x10FFFF, 0, false}, // above all groups
+	}
+	for _, c := range cases {
+		g, ok := f.GlyphIndex(c.r)
+		if ok != c.ok || (ok && g != c.want) {
+			t.Errorf("cmap13 lookup %#x = (%d,%v) want (%d,%v)", c.r, g, ok, c.want, c.ok)
 		}
 	}
 }
