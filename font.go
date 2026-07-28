@@ -35,9 +35,15 @@ type Font struct {
 	glyf             []byte
 	cmap             cmapLookup
 	cmapVS           *cmap14    // format-14 Unicode Variation Sequences subtable, if present
+	cff              *cffTable  // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
 	fvar             *fvarTable // optional: variation axes and named instances
 	avar             *avarTable // optional: axis-value segment maps
 	gvar             *gvarTable // optional: glyph variation (delta) data
+
+	// OpenType Layout tables, all optional. Absence is not an error.
+	gsub *gsub // glyph substitution (ligatures, single substitution)
+	gpos *gpos // glyph positioning (pair kerning)
+	kern *kern // legacy kern table (kerning fallback)
 
 	// TrueType instruction (hinting) tables and limits. These are optional:
 	// a font without them simply cannot be hinted. See hint.go.
@@ -70,18 +76,17 @@ const (
 // slice is retained (not copied) and must not be mutated by the caller.
 //
 // It fails on a corrupt or unsupported container: a bad sfnt magic, truncated
-// data, a missing required table, or CFF/OpenType ("OTTO") outlines, which are
-// not yet supported.
+// data, or a missing required table. Both outline flavours are supported:
+// TrueType ('glyf'/'loca') and CFF/OpenType (a "OTTO" sfnt, or any sfnt
+// carrying a 'CFF ' table), the latter decoded via cff.go.
 func Parse(b []byte) (*Font, error) {
 	if len(b) < 12 {
 		return nil, fmt.Errorf("opentype: short header: %w", errTruncated)
 	}
 	version := be32(b)
 	switch version {
-	case versionTrueType, versionTrue:
-		// supported: TrueType glyf outlines.
-	case versionOTTO:
-		return nil, errors.New("opentype: unsupported: CFF/OpenType outlines")
+	case versionTrueType, versionTrue, versionOTTO:
+		// supported: TrueType ('glyf') and CFF/OpenType ("OTTO") outlines.
 	default:
 		return nil, fmt.Errorf("opentype: bad sfnt version 0x%08x", version)
 	}
@@ -103,7 +108,18 @@ func Parse(b []byte) (*Font, error) {
 		tables[tag] = b[off : off+length]
 	}
 
-	for _, name := range []string{"head", "maxp", "hhea", "hmtx", "cmap", "loca", "glyf"} {
+	// The outline flavour is CFF when the sfnt is "OTTO" or carries a 'CFF '
+	// table; such a font needs 'CFF ' but not 'glyf'/'loca'. A TrueType font
+	// needs 'glyf'/'loca' but not 'CFF '.
+	_, hasCFF := tables["CFF "]
+	isCFF := version == versionOTTO || hasCFF
+	required := []string{"head", "maxp", "hhea", "hmtx", "cmap"}
+	if isCFF {
+		required = append(required, "CFF ")
+	} else {
+		required = append(required, "loca", "glyf")
+	}
+	for _, name := range required {
 		if _, ok := tables[name]; !ok {
 			return nil, fmt.Errorf("opentype: missing required table %q", name)
 		}
@@ -122,10 +138,18 @@ func Parse(b []byte) (*Font, error) {
 	if err := f.parseHmtx(tables["hmtx"]); err != nil {
 		return nil, err
 	}
-	if err := f.parseLoca(tables["loca"]); err != nil {
-		return nil, err
+	if isCFF {
+		cff, err := parseCFF(tables["CFF "])
+		if err != nil {
+			return nil, err
+		}
+		f.cff = cff
+	} else {
+		if err := f.parseLoca(tables["loca"]); err != nil {
+			return nil, err
+		}
+		f.glyf = tables["glyf"]
 	}
-	f.glyf = tables["glyf"]
 	if err := f.parseCmap(tables["cmap"]); err != nil {
 		return nil, err
 	}
@@ -140,7 +164,41 @@ func Parse(b []byte) (*Font, error) {
 	if err := f.parseVariations(tables); err != nil {
 		return nil, err
 	}
+	// Optional OpenType Layout tables: substitution (GSUB), positioning (GPOS)
+	// and the legacy kern table. Absence is not an error (see gsub.go, gpos.go,
+	// kern.go); they power Face.Shape and Face.Kern.
+	if err := f.parseLayout(tables); err != nil {
+		return nil, err
+	}
 	return f, nil
+}
+
+// parseLayout decodes the optional GSUB, GPOS and kern tables. Each is
+// independent; any subset (or none) may be present, and a malformed table is
+// reported as an error so a corrupt font fails cleanly.
+func (f *Font) parseLayout(tables map[string][]byte) error {
+	if b, ok := tables["GSUB"]; ok {
+		g, err := parseGSUB(b)
+		if err != nil {
+			return err
+		}
+		f.gsub = g
+	}
+	if b, ok := tables["GPOS"]; ok {
+		g, err := parseGPOS(b)
+		if err != nil {
+			return err
+		}
+		f.gpos = g
+	}
+	if b, ok := tables["kern"]; ok {
+		k, err := parseKern(b)
+		if err != nil {
+			return err
+		}
+		f.kern = k
+	}
+	return nil
 }
 
 // parseCvt decodes the Control Value Table: a run of int16 FUnit values. A

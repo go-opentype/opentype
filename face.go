@@ -23,6 +23,17 @@ type Face struct {
 	sizePx int
 	scale  float64
 	cache  map[GlyphIndex]cachedGlyph
+
+	// varCoords, when non-nil, instances a variable font's glyf outlines at the
+	// given user-space axis coordinates before rasterising (see SetVariation).
+	varCoords map[string]float64
+
+	// hinting enables the TrueType instruction interpreter for glyf glyphs that
+	// carry instructions (see SetHinting). interp is built lazily on first use
+	// and reused across glyphs; interpReady guards that one-time build.
+	hinting     bool
+	interp      *interp
+	interpReady bool
 }
 
 // cachedGlyph is a rasterised glyph held in the Face cache. ok is false when
@@ -91,7 +102,7 @@ func (fc *Face) glyph(gid GlyphIndex) cachedGlyph {
 
 // render decodes and rasterises glyph gid at the face's size.
 func (fc *Face) render(gid GlyphIndex) cachedGlyph {
-	contours, err := fc.font.glyphContours(gid)
+	contours, err := fc.outline(gid)
 	if err != nil {
 		return cachedGlyph{ok: false}
 	}
@@ -127,4 +138,110 @@ func (fc *Face) GlyphMask(r rune, x, y int) (bounds image.Rectangle, mask *image
 	advance = roundInt(float64(fc.font.advances[gid]) * fc.scale)
 	bounds = cg.bounds.Add(image.Point{X: x, Y: y})
 	return bounds, cg.mask, image.Point{}, advance, true
+}
+
+// outline returns glyph gid's outline as contours in font units, selecting the
+// outline source (CFF vs glyf), applying variable-font instancing when a
+// variation is set, and applying hinting when it is enabled.
+//
+// CFF outlines are returned as-is: variation of CFF (CFF2) and CFF hinting are
+// deferred (see cff.go), so SetVariation and SetHinting affect glyf fonts only.
+func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
+	if fc.font.cff != nil {
+		return fc.font.cff.outline(int(gid))
+	}
+	var (
+		contours []contour
+		err      error
+	)
+	if fc.varCoords != nil {
+		contours, err = fc.font.InstancePoints(int(gid), fc.varCoords)
+	} else {
+		contours, err = fc.font.glyphContours(gid)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if fc.hinting {
+		contours = fc.hintedOutline(gid, contours)
+	}
+	return contours, nil
+}
+
+// SetVariation instances the font at the user-space axis coordinates coords
+// (keyed by axis tag, e.g. {"wght": 700}); axes absent from coords take their
+// default. Subsequent GlyphMask calls reflect the instanced glyf outlines. Pass
+// nil to return to the default master. A non-variable font (or a CFF font) is
+// unaffected. The glyph cache is invalidated so the change takes effect at once.
+func (fc *Face) SetVariation(coords map[string]float64) {
+	fc.varCoords = coords
+	fc.cache = map[GlyphIndex]cachedGlyph{}
+}
+
+// SetHinting enables or disables the TrueType instruction interpreter. When
+// enabled, a glyf glyph that carries instructions is grid-fitted at the face's
+// pixel size before rasterising; glyphs without instructions, composite glyphs
+// and CFF fonts are unaffected. Hinting is off by default (the default output is
+// unhinted anti-aliased coverage). The glyph cache is invalidated.
+func (fc *Face) SetHinting(on bool) {
+	fc.hinting = on
+	fc.cache = map[GlyphIndex]cachedGlyph{}
+}
+
+// hintInterp lazily builds the interpreter for this face (running the font
+// program and control-value program once) and reuses it across glyphs. It
+// returns nil when the font has no interpreter or its programs fail to run, in
+// which case the caller renders the glyph unhinted.
+func (fc *Face) hintInterp() *interp {
+	if !fc.interpReady {
+		fc.interpReady = true
+		if it, err := newInterp(fc.font, fc.sizePx); err == nil {
+			fc.interp = it
+		}
+	}
+	return fc.interp
+}
+
+// hintedOutline grid-fits glyph gid's contours through the TrueType interpreter
+// and returns the hinted contours in font units. It falls back to the input
+// contours when the glyph carries no instructions, the interpreter is
+// unavailable, or the program fails. The whole outline is treated as one closed
+// contour for IUP, matching the interpreter's model (see hint.go).
+func (fc *Face) hintedOutline(gid GlyphIndex, contours []contour) []contour {
+	instr := fc.font.glyphInstructions(gid)
+	if len(instr) == 0 {
+		return contours
+	}
+	it := fc.hintInterp()
+	if it == nil {
+		return contours
+	}
+	// Scale to pixel space (what the interpreter expects), recording contour
+	// boundaries so the hinted points can be re-split into contours.
+	var pts []outlinePoint
+	ends := make([]int, 0, len(contours))
+	for _, c := range contours {
+		for _, p := range c {
+			pts = append(pts, outlinePoint{x: p.x * fc.scale, y: p.y * fc.scale, on: p.on})
+		}
+		ends = append(ends, len(pts)-1)
+	}
+	out, err := it.run(pts, instr)
+	if err != nil {
+		return contours
+	}
+	// Back to font units so the shared rasteriser (which re-applies scale)
+	// reproduces the hinted pixel positions.
+	result := make([]contour, len(contours))
+	start := 0
+	for i, e := range ends {
+		cc := make(contour, e-start+1)
+		for j := range cc {
+			p := out[start+j]
+			cc[j] = outlinePoint{x: p.x / fc.scale, y: p.y / fc.scale, on: p.on}
+		}
+		result[i] = cc
+		start = e + 1
+	}
+	return result
 }
