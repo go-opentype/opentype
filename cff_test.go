@@ -120,7 +120,7 @@ func TestT2VMoveAndWidthOnStem(t *testing.T) {
 
 func TestT2Curves(t *testing.T) {
 	c := &csb{}
-	c.num(0).num(0).op(21)                                  // rmoveto
+	c.num(0).num(0).op(21)                                   // rmoveto
 	c.num(10).num(10).num(10).num(-10).num(10).num(10).op(8) // rrcurveto
 	c.op(14)
 	got := mustRun(t, c.b, nil, nil)
@@ -134,10 +134,10 @@ func TestT2HHVVCurve(t *testing.T) {
 	// hhcurveto and vvcurveto, each with and without the leading extra delta.
 	c := &csb{}
 	c.num(0).num(0).op(21)
-	c.num(10).num(10).num(10).num(10).op(27)         // hhcurveto (no dy1)
-	c.num(5).num(10).num(10).num(10).num(10).op(27)  // hhcurveto (leading dy1)
-	c.num(10).num(10).num(10).num(10).op(26)         // vvcurveto (no dx1)
-	c.num(5).num(10).num(10).num(10).num(10).op(26)  // vvcurveto (leading dx1)
+	c.num(10).num(10).num(10).num(10).op(27)        // hhcurveto (no dy1)
+	c.num(5).num(10).num(10).num(10).num(10).op(27) // hhcurveto (leading dy1)
+	c.num(10).num(10).num(10).num(10).op(26)        // vvcurveto (no dx1)
+	c.num(5).num(10).num(10).num(10).num(10).op(26) // vvcurveto (leading dx1)
 	c.op(14)
 	mustRun(t, c.b, nil, nil)
 }
@@ -168,9 +168,9 @@ func TestT2Hintmask(t *testing.T) {
 	// hstem then hintmask with implicit vstem args (so 2 stems -> 1 mask byte),
 	// then cntrmask.
 	c := &csb{}
-	c.num(10).num(20).op(1)          // hstem (1 stem)
-	c.num(30).num(40).op(19).raw(0)  // hintmask: implicit vstem + 1 mask byte
-	c.op(20).raw(0)                  // cntrmask + 1 mask byte
+	c.num(10).num(20).op(1)         // hstem (1 stem)
+	c.num(30).num(40).op(19).raw(0) // hintmask: implicit vstem + 1 mask byte
+	c.op(20).raw(0)                 // cntrmask + 1 mask byte
 	c.num(0).num(0).op(21)
 	c.num(50).num(0).op(5)
 	c.op(14)
@@ -276,8 +276,8 @@ func TestT2ShortIntAndFixedOperands(t *testing.T) {
 	c.raw(28, 0x01, 0x2c)  // shortint 300 (width, stripped by rmoveto)
 	c.num(0).num(0).op(21) // rmoveto with a preceding width value
 	c.fixed(12.5).num(0).op(5)
-	c.num(300).num(0).op(5)   // 247.. form
-	c.num(-300).num(0).op(5)  // 251.. form
+	c.num(300).num(0).op(5)  // 247.. form
+	c.num(-300).num(0).op(5) // 251.. form
 	c.op(14)
 	mustRun(t, c.b, nil, nil)
 }
@@ -368,8 +368,8 @@ func TestParseIndexErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"count truncated":   {0},
 		"bad offSize":       {0, 1, 0},
-		"offsets truncated": {0, 1, 1, 1},       // count 1, offSize 1, only one offset
-		"item out of range": {0, 1, 1, 1, 0},    // offsets [1,0] -> start>end
+		"offsets truncated": {0, 1, 1, 1},    // count 1, offSize 1, only one offset
+		"item out of range": {0, 1, 1, 1, 0}, // offsets [1,0] -> start>end
 	}
 	for name, b := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -385,13 +385,13 @@ func TestParseDictOperand(t *testing.T) {
 		b    []byte
 		want float64
 	}{
-		{[]byte{28, 0x01, 0x00}, 256},        // shortint
-		{[]byte{29, 0, 0, 1, 0}, 256},        // longint
-		{[]byte{100}, -39},                   // 32..246
-		{[]byte{247, 0}, 108},                // 247..250
-		{[]byte{251, 0}, -108},               // 251..254
-		{[]byte{30, 0x2a, 0x5f}, 2.5},        // real "2.5"
-		{[]byte{30, 0x1b, 0x2f}, 100},        // real "1E2"
+		{[]byte{28, 0x01, 0x00}, 256},         // shortint
+		{[]byte{29, 0, 0, 1, 0}, 256},         // longint
+		{[]byte{100}, -39},                    // 32..246
+		{[]byte{247, 0}, 108},                 // 247..250
+		{[]byte{251, 0}, -108},                // 251..254
+		{[]byte{30, 0x2a, 0x5f}, 2.5},         // real "2.5"
+		{[]byte{30, 0x1b, 0x2f}, 100},         // real "1E2"
 		{[]byte{30, 0xe1, 0xc2, 0xf0}, -0.01}, // real "-1E-2"
 	}
 	for _, tc := range cases {
@@ -485,12 +485,24 @@ func dictOperator(op int) []byte {
 
 // cffOptions configures the synthetic CFF builder.
 type cffOptions struct {
-	glyphs        [][]byte
-	gsubrs        [][]byte
-	lsubrs        [][]byte
-	includePriv   bool
-	charType      int  // 0 -> omit CharstringType operator
-	omitCharStr   bool // omit the CharStrings operator entirely
+	glyphs      [][]byte
+	gsubrs      [][]byte
+	lsubrs      [][]byte
+	includePriv bool
+	charType    int   // 0 -> omit CharstringType operator
+	omitCharStr bool  // omit the CharStrings operator entirely
+	charsetSIDs []int // when non-nil, emit a format-0 charset (SID per glyph 1..n-1)
+}
+
+// cffCharset0 encodes a format-0 charset: one uint16 string id per glyph 1..n-1
+// (glyph 0 is always .notdef and is not listed).
+func cffCharset0(sids []int) []byte {
+	w := &bw{}
+	w.u8(0) // format 0
+	for _, s := range sids {
+		w.u16(uint16(s))
+	}
+	return w.bytes()
 }
 
 // buildCFF assembles a complete, valid CFF table from o, resolving all internal
@@ -510,8 +522,12 @@ func buildCFF(o cffOptions) []byte {
 		privDict = append(dictLong(6), dictOperator(19)...)
 		lsubrIdx = cffIndex(o.lsubrs)
 	}
+	var charsetData []byte
+	if o.charsetSIDs != nil {
+		charsetData = cffCharset0(o.charsetSIDs)
+	}
 
-	encodeTop := func(csOff, privOff int) []byte {
+	encodeTop := func(csOff, privOff, charsetOff int) []byte {
 		var td []byte
 		if !o.omitCharStr {
 			td = append(td, dictLong(csOff)...)
@@ -522,6 +538,10 @@ func buildCFF(o cffOptions) []byte {
 			td = append(td, dictLong(privOff)...)
 			td = append(td, dictOperator(18)...)
 		}
+		if o.charsetSIDs != nil {
+			td = append(td, dictLong(charsetOff)...)
+			td = append(td, dictOperator(15)...)
+		}
 		if o.charType != 0 {
 			td = append(td, dictLong(o.charType)...)
 			td = append(td, dictOperator(1206)...)
@@ -530,11 +550,12 @@ func buildCFF(o cffOptions) []byte {
 	}
 
 	// Pass 1: measure the Top DICT INDEX length using placeholder offsets.
-	topLen := len(cffIndex([][]byte{encodeTop(0, 0)}))
+	topLen := len(cffIndex([][]byte{encodeTop(0, 0, 0)}))
 	csOff := len(header) + len(name) + topLen + len(strIdx) + len(gsubrIdx)
 	privOff := csOff + len(csIdx)
+	charsetOff := privOff + len(privDict) + len(lsubrIdx)
 	// Pass 2: real offsets (same lengths, fixed-width encoding).
-	topIdx := cffIndex([][]byte{encodeTop(csOff, privOff)})
+	topIdx := cffIndex([][]byte{encodeTop(csOff, privOff, charsetOff)})
 
 	out := append([]byte{}, header...)
 	out = append(out, name...)
@@ -544,6 +565,7 @@ func buildCFF(o cffOptions) []byte {
 	out = append(out, csIdx...)
 	out = append(out, privDict...)
 	out = append(out, lsubrIdx...)
+	out = append(out, charsetData...)
 	return out
 }
 
@@ -553,13 +575,13 @@ func TestParseCFFRoundTrip(t *testing.T) {
 	gsub := (&csb{}).num(0).num(20).op(5).op(11).b // rlineto + return
 
 	g0 := &csb{}
-	g0.num(700).num(50).num(50).op(1)               // hstem with width + stem
-	g0.num(20).num(30).op(19).raw(0)                // hintmask (implicit vstem)
-	g0.num(0).num(0).op(21)                         // rmoveto
-	g0.num(-107).op(10)                             // callsubr (local 0)
-	g0.num(-107).op(29)                             // callgsubr (global 0)
+	g0.num(700).num(50).num(50).op(1)                         // hstem with width + stem
+	g0.num(20).num(30).op(19).raw(0)                          // hintmask (implicit vstem)
+	g0.num(0).num(0).op(21)                                   // rmoveto
+	g0.num(-107).op(10)                                       // callsubr (local 0)
+	g0.num(-107).op(29)                                       // callgsubr (global 0)
 	g0.num(10).num(10).num(10).num(-10).num(10).num(10).op(8) // rrcurveto
-	g0.op(14)                                       // endchar
+	g0.op(14)                                                 // endchar
 
 	g1 := (&csb{}).op(14).b // empty glyph
 
@@ -622,7 +644,7 @@ func TestParseCFFMissingCharStrings(t *testing.T) {
 
 func TestParseCFFHeaderErrors(t *testing.T) {
 	cases := map[string][]byte{
-		"too short":        {1, 0, 4},
+		"too short":         {1, 0, 4},
 		"hdrSize too small": {1, 0, 3, 1},
 		"hdrSize too big":   {1, 0, 200, 1},
 	}
@@ -659,8 +681,8 @@ func TestParseCFFStringAndGsubrErrors(t *testing.T) {
 	// truncated String INDEX.
 	td := append(dictLong(4), dictOperator(17)...)
 	prefix := []byte{1, 0, 4, 1}
-	prefix = append(prefix, cffIndex(nil)...)             // name
-	prefix = append(prefix, cffIndex([][]byte{td})...)    // top dict
+	prefix = append(prefix, cffIndex(nil)...)          // name
+	prefix = append(prefix, cffIndex([][]byte{td})...) // top dict
 	// truncated string index (single byte)
 	if _, err := parseCFF(append(append([]byte{}, prefix...), 0)); err == nil {
 		t.Fatal("expected string index error")
@@ -685,7 +707,7 @@ func TestParseCFFTopDictParseError(t *testing.T) {
 }
 
 func TestParseCFFCharStringsOffsetOutOfRange(t *testing.T) {
-	td := append(dictLong(1 << 20), dictOperator(17)...) // huge CharStrings offset
+	td := append(dictLong(1<<20), dictOperator(17)...) // huge CharStrings offset
 	prefix := []byte{1, 0, 4, 1}
 	prefix = append(prefix, cffIndex(nil)...)
 	prefix = append(prefix, cffIndex([][]byte{td})...)
@@ -784,6 +806,169 @@ func TestParseLocalSubrsSubrOffsetOutOfRange(t *testing.T) {
 	top := map[int][]float64{18: {float64(len(priv)), 0}}
 	if _, err := parseLocalSubrs(data, top); err == nil {
 		t.Fatal("expected subr offset out of range error")
+	}
+}
+
+// --- endchar seac (accent composition) --------------------------------------
+
+func TestStandardEncodingSID(t *testing.T) {
+	cases := []struct {
+		code int
+		sid  uint16
+		ok   bool
+	}{
+		{32, 1, true},    // space (low range)
+		{65, 34, true},   // 'A' (low range)
+		{126, 95, true},  // asciitilde (top of low range)
+		{193, 124, true}, // grave (high table)
+		{251, 149, true}, // germandbls (top of high table)
+		{160, 0, false},  // gap in the high range
+		{300, 0, false},  // beyond any encoded code
+		{31, 0, false},   // just below the low range
+	}
+	for _, c := range cases {
+		sid, ok := standardEncodingSID(c.code)
+		if ok != c.ok || (ok && sid != c.sid) {
+			t.Fatalf("standardEncodingSID(%d) = (%d,%v), want (%d,%v)", c.code, sid, ok, c.sid, c.ok)
+		}
+	}
+}
+
+func TestParseCharset(t *testing.T) {
+	// Predefined (offset 0/1/2) -> identity: string id i maps to glyph i.
+	m, err := parseCharset(nil, 0, 3)
+	if err != nil || m[0] != 0 || m[1] != 1 || m[2] != 2 {
+		t.Fatalf("predefined charset = %v, %v", m, err)
+	}
+	// Embedded formats, placed at offset 3 (past a 3-byte pad).
+	pad := []byte{0, 0, 0}
+	f0 := append(append([]byte{}, pad...), 0x00, 0, 10, 0, 20) // gid1->10, gid2->20
+	if m, err = parseCharset(f0, 3, 3); err != nil || m[10] != 1 || m[20] != 2 {
+		t.Fatalf("format 0 = %v, %v", m, err)
+	}
+	f1 := append(append([]byte{}, pad...), 0x01, 0, 10, 2) // first 10, nLeft 2 -> 10,11,12
+	if m, err = parseCharset(f1, 3, 4); err != nil || m[10] != 1 || m[11] != 2 || m[12] != 3 {
+		t.Fatalf("format 1 = %v, %v", m, err)
+	}
+	f2 := append(append([]byte{}, pad...), 0x02, 0, 10, 0, 2) // first 10, nLeft 2 (uint16)
+	if m, err = parseCharset(f2, 3, 4); err != nil || m[10] != 1 || m[11] != 2 || m[12] != 3 {
+		t.Fatalf("format 2 = %v, %v", m, err)
+	}
+	// Error paths.
+	if _, err = parseCharset(nil, 100, 2); err == nil {
+		t.Fatal("expected offset-out-of-range error")
+	}
+	if _, err = parseCharset(append(append([]byte{}, pad...), 0x09), 3, 2); err == nil {
+		t.Fatal("expected unsupported-format error")
+	}
+	if _, err = parseCharset(append(append([]byte{}, pad...), 0x00), 3, 3); err == nil {
+		t.Fatal("expected truncated-charset error")
+	}
+}
+
+func TestParseCFFSeac(t *testing.T) {
+	adx, ady := 100, 50
+	// Glyph 0 is a seac: base 'A' (code 65 -> SID 34) + accent grave (code 193
+	// -> SID 124), the accent shifted by (adx, ady).
+	seacCS := (&csb{}).num(adx).num(ady).num(65).num(193).op(14).b
+	base := (&csb{}).num(0).num(0).op(21).num(50).num(0).op(5).num(0).num(50).op(5).op(14).b
+	accent := (&csb{}).num(10).num(10).op(21).num(20).num(0).op(5).op(14).b
+	data := buildCFF(cffOptions{
+		glyphs:      [][]byte{seacCS, base, accent},
+		charsetSIDs: []int{34, 124}, // glyph 1 -> SID 34 ('A'), glyph 2 -> SID 124 (grave)
+	})
+	c, err := parseCFF(data)
+	if err != nil {
+		t.Fatalf("parseCFF: %v", err)
+	}
+	baseC, err := c.outline(1)
+	if err != nil {
+		t.Fatalf("outline base: %v", err)
+	}
+	accC, err := c.outline(2)
+	if err != nil {
+		t.Fatalf("outline accent: %v", err)
+	}
+	got, err := c.outline(0)
+	if err != nil {
+		t.Fatalf("outline seac: %v", err)
+	}
+	if len(got) != len(baseC)+len(accC) {
+		t.Fatalf("seac contours = %d, want %d", len(got), len(baseC)+len(accC))
+	}
+	for i := range baseC {
+		for j := range baseC[i] {
+			if got[i][j] != baseC[i][j] {
+				t.Fatalf("base contour %d point %d = %+v, want %+v", i, j, got[i][j], baseC[i][j])
+			}
+		}
+	}
+	for i := range accC {
+		gi := len(baseC) + i
+		for j := range accC[i] {
+			want := outlinePoint{x: accC[i][j].x + float64(adx), y: accC[i][j].y + float64(ady), on: accC[i][j].on}
+			if got[gi][j] != want {
+				t.Fatalf("accent contour %d point %d = %+v, want %+v", i, j, got[gi][j], want)
+			}
+		}
+	}
+}
+
+func TestT2SeacErrors(t *testing.T) {
+	goodBase := (&csb{}).num(0).num(0).op(21).num(10).num(0).op(5).op(14).b
+	badBase := []byte{13} // unknown operator
+	seac := func(bchar, achar int) []byte {
+		return (&csb{}).num(0).num(0).num(bchar).num(achar).op(14).b
+	}
+	cases := []struct {
+		name    string
+		strings [][]byte
+		sid     map[int]int
+	}{
+		// bchar code has no standard-encoding glyph.
+		{"bchar unencoded", [][]byte{seac(160, 65)}, map[int]int{34: 0}},
+		// bchar valid but its string id is not in the charset.
+		{"bchar no glyph", [][]byte{seac(65, 65)}, nil},
+		// accent code has no standard-encoding glyph (base resolves first).
+		{"achar unencoded", [][]byte{seac(65, 160), goodBase}, map[int]int{34: 1}},
+		// base component charstring is malformed.
+		{"base outline error", [][]byte{seac(65, 65), badBase}, map[int]int{34: 1}},
+		// accent component charstring is malformed.
+		{"accent outline error", [][]byte{seac(65, 193), goodBase, badBase}, map[int]int{34: 1, 124: 2}},
+		// seac whose base is itself -> composition-depth guard trips.
+		{"cyclic seac", [][]byte{seac(65, 65)}, map[int]int{34: 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &cffTable{charstringType: 2, charStrings: tc.strings, sidToGid: tc.sid}
+			if _, err := c.outline(0); err == nil {
+				t.Fatal("expected seac error, got nil")
+			}
+		})
+	}
+}
+
+func TestParseCFFCharsetError(t *testing.T) {
+	// Top DICT with a valid CharStrings offset and a charset offset (op 15)
+	// that points past the data, so parseCFF surfaces the charset error.
+	prefix := []byte{1, 0, 4, 1}
+	prefix = append(prefix, cffIndex(nil)...) // name
+	strIdx := cffIndex(nil)
+	gsubrIdx := cffIndex(nil)
+	td0 := append(dictLong(0), dictOperator(17)...)
+	td0 = append(td0, dictLong(0)...)
+	td0 = append(td0, dictOperator(15)...)
+	topLen := len(cffIndex([][]byte{td0}))
+	csOff := len(prefix) + topLen + len(strIdx) + len(gsubrIdx)
+	td := append(dictLong(csOff), dictOperator(17)...)
+	td = append(td, dictLong(1<<20)...) // charset offset out of range
+	td = append(td, dictOperator(15)...)
+	prefix = append(prefix, cffIndex([][]byte{td})...)
+	prefix = append(prefix, strIdx...)
+	prefix = append(prefix, gsubrIdx...)
+	prefix = append(prefix, cffIndex([][]byte{(&csb{}).op(14).b})...) // CharStrings
+	if _, err := parseCFF(prefix); err == nil {
+		t.Fatal("expected charset error via parseCFF")
 	}
 }
 

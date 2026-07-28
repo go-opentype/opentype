@@ -18,10 +18,14 @@ import "fmt"
 // not touch are recovered by IUP (Interpolation of Untouched Points), done per
 // contour against the default-master coordinates.
 //
-// Deferred (not implemented here): variation of composite-glyph component
-// offsets, and metric variation via HVAR/VVAR/MVAR. The four TrueType phantom
-// points are carried through delta application (so "all points" and explicit
-// point sets index correctly) but are dropped from the result.
+// Both simple and composite glyphs are variable: simple-glyph points get their
+// deltas with per-contour IUP, while a composite glyph's per-component
+// placement offsets (and the four phantom points) get theirs directly, with no
+// IUP (each component point is independent). The four TrueType phantom points
+// are carried through delta application (so "all points" and explicit point
+// sets index correctly) but are dropped from the result.
+//
+// Deferred (not implemented here): metric variation via HVAR/VVAR/MVAR.
 
 // gvarTable is the parsed 'gvar' table.
 type gvarTable struct {
@@ -127,7 +131,7 @@ func (f *Font) applyVariation(gid int, pts []outlinePoint, ends []int, norm []in
 	numReal := len(pts)
 	accX := make([]float64, numReal+4) // + four phantom points
 	accY := make([]float64, numReal+4)
-	if err := gv.applyGlyph(gv.data[start:end], coords, ends, pts, accX, accY); err != nil {
+	if err := gv.applyGlyph(gv.data[start:end], coords, ends, pts, accX, accY, false); err != nil {
 		return out
 	}
 	for i := 0; i < numReal; i++ {
@@ -148,8 +152,12 @@ type tupleHeader struct {
 }
 
 // applyGlyph decodes one glyph's GlyphVariationData and accumulates every
-// applicable tuple's scaled deltas into accX/accY (length numReal+4).
-func (gv *gvarTable) applyGlyph(gd []byte, coords []float64, ends []int, pts []outlinePoint, accX, accY []float64) error {
+// applicable tuple's scaled deltas into accX/accY (length numPts). For a simple
+// glyph (composite false) untouched points of an explicit set are filled by
+// per-contour IUP against pts; for a composite glyph (composite true, ends and
+// pts nil) each point is a component offset or phantom point and untouched
+// points simply stay zero — no IUP.
+func (gv *gvarTable) applyGlyph(gd []byte, coords []float64, ends []int, pts []outlinePoint, accX, accY []float64, composite bool) error {
 	numPts := len(accX)
 	r := reader{b: gd}
 	countAndFlags := r.u16()
@@ -231,7 +239,7 @@ func (gv *gvarTable) applyGlyph(gd []byte, coords []float64, ends []int, pts []o
 
 		scalar := supportScalar(coords, h.lower, h.peak, h.upper)
 		if scalar != 0 {
-			accumulate(scalar, all, points, dx, dy, ends, pts, accX, accY)
+			accumulate(scalar, all, points, dx, dy, ends, pts, accX, accY, !composite)
 		}
 		pos += h.size
 	}
@@ -333,9 +341,11 @@ func supportScalar(coords, lower, peak, upper []float64) float64 {
 }
 
 // accumulate adds one tuple's contribution to accX/accY. For an explicit point
-// set it fills untouched points per contour by IUP before scaling; for the
-// "all points" set every point is touched and deltas apply directly.
-func accumulate(scalar float64, all bool, points []int, dx, dy []float64, ends []int, pts []outlinePoint, accX, accY []float64) {
+// set it places each touched point's delta; iup then fills the untouched points
+// per contour by interpolation (simple glyphs) or leaves them at zero
+// (composite glyphs). For the "all points" set every point is touched and
+// deltas apply directly.
+func accumulate(scalar float64, all bool, points []int, dx, dy []float64, ends []int, pts []outlinePoint, accX, accY []float64, iup bool) {
 	numPts := len(accX)
 	fullX := make([]float64, numPts)
 	fullY := make([]float64, numPts)
@@ -355,10 +365,12 @@ func accumulate(scalar float64, all bool, points []int, dx, dy []float64, ends [
 			fullY[pi] = dy[k]
 			touched[pi] = true
 		}
-		startIdx := 0
-		for _, e := range ends {
-			iupContour(pts[startIdx:e+1], fullX[startIdx:e+1], fullY[startIdx:e+1], touched[startIdx:e+1])
-			startIdx = e + 1
+		if iup {
+			startIdx := 0
+			for _, e := range ends {
+				iupContour(pts[startIdx:e+1], fullX[startIdx:e+1], fullY[startIdx:e+1], touched[startIdx:e+1])
+				startIdx = e + 1
+			}
 		}
 	}
 
@@ -420,16 +432,12 @@ func iupInterp(target, lo, hi, dlo, dhi float64) float64 {
 	return dlo + (dhi-dlo)*(target-lo)/(hi-lo)
 }
 
-// InstancePoints returns glyph gid's outline, as contours in font units,
-// instanced at the user-space axis coordinates coords (keyed by axis tag).
-// Axes absent from coords take their default. For a non-variable font, or a
-// glyph with no variation data, it returns the default outline. Composite
-// glyphs are returned resolved but with component-offset variation not applied
-// (see the deferred note in this file).
-func (f *Font) InstancePoints(gid int, coords map[string]float64) ([]contour, error) {
-	contours, err := f.glyphContours(GlyphIndex(gid))
-	if err != nil {
-		return nil, err
+// varySimple applies glyph gid's 'gvar' point deltas to a simple glyph's
+// contours at normalized coordinate norm, returning fresh contours. A nil norm
+// or a font without 'gvar' returns contours unchanged (the default outline).
+func (f *Font) varySimple(gid int, contours []contour, norm []int16) []contour {
+	if norm == nil || f.gvar == nil {
+		return contours
 	}
 	var pts []outlinePoint
 	var ends []int
@@ -437,14 +445,59 @@ func (f *Font) InstancePoints(gid int, coords map[string]float64) ([]contour, er
 		pts = append(pts, c...)
 		ends = append(ends, len(pts)-1)
 	}
-	norm := f.NormalizeCoords(coords)
 	varied := f.applyVariation(gid, pts, ends, norm)
 
-	result := make([]contour, len(contours))
+	out := make([]contour, len(contours))
 	startIdx := 0
 	for i, e := range ends {
-		result[i] = varied[startIdx : e+1]
+		out[i] = varied[startIdx : e+1]
 		startIdx = e + 1
 	}
-	return result, nil
+	return out
+}
+
+// varyComponentOffsets applies glyph gid's 'gvar' deltas to a composite glyph's
+// component placement offsets in place (dxs/dys, one entry per component). The
+// gvar point set for a composite indexes the components in order followed by
+// four phantom points; deltas apply with no IUP. A nil norm, a font without
+// 'gvar', or malformed data leaves dxs/dys unchanged.
+func (f *Font) varyComponentOffsets(gid int, comps []glyphComponent, dxs, dys []float64, norm []int16) {
+	if norm == nil {
+		return
+	}
+	gv := f.gvar
+	if gv == nil || gid < 0 || gid+1 >= len(gv.dataOffsets) {
+		return
+	}
+	start := gv.dataArrayOff + int(gv.dataOffsets[gid])
+	end := gv.dataArrayOff + int(gv.dataOffsets[gid+1])
+	if start >= end || end > len(gv.data) {
+		return
+	}
+	coords := make([]float64, gv.axisCount)
+	for i := range coords {
+		if i < len(norm) {
+			coords[i] = float64(norm[i]) / 16384.0
+		}
+	}
+	accX := make([]float64, len(comps)+4) // component offsets + four phantom points
+	accY := make([]float64, len(comps)+4)
+	if err := gv.applyGlyph(gv.data[start:end], coords, nil, nil, accX, accY, true); err != nil {
+		return
+	}
+	for i := range comps {
+		dxs[i] += accX[i]
+		dys[i] += accY[i]
+	}
+}
+
+// InstancePoints returns glyph gid's outline, as contours in font units,
+// instanced at the user-space axis coordinates coords (keyed by axis tag).
+// Axes absent from coords take their default. For a non-variable font, or a
+// glyph with no variation data, it returns the default outline. Both simple
+// and composite glyphs are varied: a composite's component offsets get their
+// deltas and each component is instanced recursively at the same coordinate.
+func (f *Font) InstancePoints(gid int, coords map[string]float64) ([]contour, error) {
+	norm := f.NormalizeCoords(coords)
+	return f.loadGlyph(GlyphIndex(gid), 0, map[GlyphIndex]bool{}, norm)
 }

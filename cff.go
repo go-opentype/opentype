@@ -28,11 +28,16 @@ type cffTable struct {
 	gsubrBias      int
 	lsubrBias      int
 	charstringType int
+	sidToGid       map[int]int // charset: string id -> glyph id (for seac)
 }
 
 // maxT2Depth bounds callsubr/callgsubr recursion; deeper nesting is rejected as
 // malformed.
 const maxT2Depth = 10
+
+// maxSeacDepth bounds endchar-seac accent composition recursion (a seac glyph
+// whose base or accent is itself a seac), rejecting cycles as malformed.
+const maxSeacDepth = 4
 
 // maxT2Stack is the Type2 operand-stack limit (the spec permits 48 arguments).
 const maxT2Stack = 48
@@ -275,6 +280,12 @@ func parseCFF(data []byte) (*cffTable, error) {
 		return nil, err
 	}
 
+	charsetOff, _ := dictInt(top, 15, 0) // absent -> 0 (ISOAdobe predefined)
+	sidToGid, err := parseCharset(data, charsetOff, len(charStrings))
+	if err != nil {
+		return nil, err
+	}
+
 	return &cffTable{
 		charStrings:    charStrings,
 		globalSubrs:    gsubrs,
@@ -282,7 +293,60 @@ func parseCFF(data []byte) (*cffTable, error) {
 		gsubrBias:      subrBias(len(gsubrs)),
 		lsubrBias:      subrBias(len(localSubrs)),
 		charstringType: cst,
+		sidToGid:       sidToGid,
 	}, nil
+}
+
+// parseCharset decodes the CFF charset (Top DICT operator 15) into a string-id
+// -> glyph-id map, used to resolve endchar-seac base/accent glyph references.
+// A predefined charset (offset 0, 1 or 2) or an absent operator is treated as
+// the identity mapping (glyph i has string id i), which is exact for the
+// ISOAdobe charset. Formats 0, 1 and 2 of an embedded charset are decoded.
+func parseCharset(data []byte, off, nGlyphs int) (map[int]int, error) {
+	m := map[int]int{0: 0} // glyph 0 (.notdef) is always string id 0
+	if off <= 2 {
+		for gid := 0; gid < nGlyphs; gid++ {
+			m[gid] = gid
+		}
+		return m, nil
+	}
+	if off > len(data) {
+		return nil, fmt.Errorf("opentype: cff charset offset out of range")
+	}
+	r := &reader{b: data, pos: off}
+	format := r.u8()
+	gid := 1
+	switch format {
+	case 0:
+		for gid < nGlyphs {
+			m[int(r.u16())] = gid
+			gid++
+		}
+	case 1:
+		for gid < nGlyphs {
+			first := int(r.u16())
+			nLeft := int(r.u8())
+			for i := 0; i <= nLeft && gid < nGlyphs; i++ {
+				m[first+i] = gid
+				gid++
+			}
+		}
+	case 2:
+		for gid < nGlyphs {
+			first := int(r.u16())
+			nLeft := int(r.u16())
+			for i := 0; i <= nLeft && gid < nGlyphs; i++ {
+				m[first+i] = gid
+				gid++
+			}
+		}
+	default:
+		return nil, fmt.Errorf("opentype: cff charset: unsupported format %d", format)
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cff charset: %w", r.err)
+	}
+	return m, nil
 }
 
 // parseLocalSubrs resolves the Private DICT referenced by the Top DICT and, if
@@ -327,15 +391,22 @@ type t2machine struct {
 	nStems    int
 	widthDone bool
 	done      bool
+	seacDepth int // endchar-seac accent-composition recursion depth
 }
 
 // outline interprets glyph gid's Type2 charstring into its outline as a set of
 // contours in font units (all points on-curve, cubics pre-flattened).
 func (c *cffTable) outline(gid int) ([]contour, error) {
+	return c.outlineSeac(gid, 0)
+}
+
+// outlineSeac is outline with an explicit endchar-seac recursion depth so that
+// a seac's base and accent components (themselves glyphs) can be composed.
+func (c *cffTable) outlineSeac(gid, seacDepth int) ([]contour, error) {
 	if gid < 0 || gid >= len(c.charStrings) {
 		return nil, fmt.Errorf("opentype: cff glyph %d out of range", gid)
 	}
-	m := &t2machine{c: c}
+	m := &t2machine{c: c, seacDepth: seacDepth}
 	if err := m.run(c.charStrings[gid], 0); err != nil {
 		return nil, err
 	}
@@ -544,6 +615,11 @@ func (m *t2machine) operator(b0 byte, code []byte, i, depth int) (stop bool, ni 
 		return true, i, nil
 	case 14: // endchar
 		m.width(true)
+		if len(m.stack) >= 4 { // deprecated seac: adx ady bchar achar
+			if err := m.seac(); err != nil {
+				return false, i, err
+			}
+		}
 		m.done = true
 		return true, i, nil
 	case 12: // escape: two-byte operator
@@ -764,4 +840,76 @@ func (m *t2machine) altLine(startHoriz bool) {
 		horiz = !horiz
 	}
 	m.clear()
+}
+
+// seac composes the accented glyph described by the four endchar-seac operands
+// (adx ady bchar achar) left on the stack: the base glyph's outline plus the
+// accent glyph's outline shifted by (adx, ady). bchar and achar are Standard
+// Encoding codes, resolved to glyphs via the Standard Encoding and the CFF
+// charset. Any outline the seac charstring drew itself is retained.
+func (m *t2machine) seac() error {
+	if m.seacDepth >= maxSeacDepth {
+		return fmt.Errorf("opentype: cff seac: composition nesting too deep")
+	}
+	n := len(m.stack)
+	adx, ady := m.stack[n-4], m.stack[n-3]
+	bchar, achar := int(m.stack[n-2]), int(m.stack[n-1])
+	base, err := m.c.seacComponent(bchar, m.seacDepth+1)
+	if err != nil {
+		return err
+	}
+	accent, err := m.c.seacComponent(achar, m.seacDepth+1)
+	if err != nil {
+		return err
+	}
+	m.finishContour()
+	m.contours = append(m.contours, base...)
+	for _, cont := range accent {
+		nc := make(contour, len(cont))
+		for i, p := range cont {
+			nc[i] = outlinePoint{x: p.x + adx, y: p.y + ady, on: p.on}
+		}
+		m.contours = append(m.contours, nc)
+	}
+	m.clear()
+	return nil
+}
+
+// seacComponent resolves a Standard Encoding code to a glyph id (via the
+// standard encoding and the CFF charset) and returns that glyph's outline.
+func (c *cffTable) seacComponent(code, seacDepth int) ([]contour, error) {
+	sid, ok := standardEncodingSID(code)
+	if !ok {
+		return nil, fmt.Errorf("opentype: cff seac: code %d not in standard encoding", code)
+	}
+	gid, ok := c.sidToGid[int(sid)]
+	if !ok {
+		return nil, fmt.Errorf("opentype: cff seac: no glyph for string id %d", sid)
+	}
+	return c.outlineSeac(gid, seacDepth)
+}
+
+// standardEncodingSID maps a Standard Encoding character code to its CFF
+// standard-string id (SID). For the printable ASCII range 32..126 the SID is
+// simply code-31; the punctuation/accent codes 161..251 use a lookup table.
+// ok is false for codes with no Standard Encoding glyph.
+func standardEncodingSID(code int) (uint16, bool) {
+	if code >= 32 && code <= 126 {
+		return uint16(code - 31), true
+	}
+	sid, ok := stdEncodingHigh[code]
+	return sid, ok
+}
+
+// stdEncodingHigh holds the Standard Encoding codes above the printable ASCII
+// range (161..251) and their CFF standard-string ids.
+var stdEncodingHigh = map[int]uint16{
+	161: 96, 162: 97, 163: 98, 164: 99, 165: 100, 166: 101, 167: 102, 168: 103,
+	169: 104, 170: 105, 171: 106, 172: 107, 173: 108, 174: 109, 175: 110,
+	177: 111, 178: 112, 179: 113, 180: 114, 182: 115, 183: 116, 184: 117,
+	185: 118, 186: 119, 187: 120, 188: 121, 189: 122, 191: 123, 193: 124,
+	194: 125, 195: 126, 196: 127, 197: 128, 198: 129, 199: 130, 200: 131,
+	202: 132, 203: 133, 205: 134, 206: 135, 207: 136, 208: 137, 225: 138,
+	227: 139, 232: 140, 233: 141, 234: 142, 235: 143, 241: 144, 245: 145,
+	248: 146, 249: 147, 250: 148, 251: 149,
 }
