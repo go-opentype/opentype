@@ -45,6 +45,21 @@ type Font struct {
 	gpos *gpos // glyph positioning (pair kerning)
 	kern *kern // legacy kern table (kerning fallback)
 
+	// Vertical writing-mode metrics (vhea/vmtx/VORG), all optional. They enable
+	// top-to-bottom (CJK tategaki) layout; absence means vertical metrics are
+	// unavailable. See vertical.go.
+	vertAscender        int   // vhea vertTypoAscender, font units
+	vertDescender       int   // vhea vertTypoDescender, font units
+	vertLineGap         int   // vhea vertTypoLineGap, font units
+	numOfLongVerMetrics int   // vhea count of full vmtx entries
+	vertAdvances        []int // advanceHeight per glyph, font units (vmtx)
+	tsbs                []int // top side bearing per glyph, font units (vmtx)
+	vorgDefault         int   // VORG defaultVertOriginY, font units
+	vorg                map[GlyphIndex]int // VORG per-glyph vertical origin overrides
+	hasVhea             bool
+	hasVmtx             bool
+	hasVORG             bool
+
 	// TrueType instruction (hinting) tables and limits. These are optional:
 	// a font without them simply cannot be hinted. See hint.go.
 	fpgm             []byte // font program (function definitions)
@@ -168,6 +183,11 @@ func Parse(b []byte) (*Font, error) {
 	// and the legacy kern table. Absence is not an error (see gsub.go, gpos.go,
 	// kern.go); they power Face.Shape and Face.Kern.
 	if err := f.parseLayout(tables); err != nil {
+		return nil, err
+	}
+	// Optional vertical writing-mode tables (vhea, vmtx, VORG). Absence is not an
+	// error; they supply the metrics for top-to-bottom layout (see vertical.go).
+	if err := f.parseVertical(tables); err != nil {
 		return nil, err
 	}
 	return f, nil
