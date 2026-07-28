@@ -323,7 +323,7 @@ func TestCffGridFitNilPriv(t *testing.T) {
 		priv:  nil,
 	}
 	in := []contour{{{x: 33, y: 0, on: true}, {x: 133, y: 0, on: true}}}
-	out := cffGridFit(in, gh, 0.1, 12)
+	out := cffGridFit(in, gh, 0.1, 12, false)
 	// x = 33*0.1 = 3.3 -> rounds to 3 device -> 30 font units.
 	if math.Abs(out[0][0].x*0.1-math.Round(out[0][0].x*0.1)) > 1e-9 {
 		t.Errorf("nil-priv grid fit did not land edge on grid: %v", out[0][0].x)
@@ -512,6 +512,213 @@ func TestCFF2HintingViaFace(t *testing.T) {
 	// An out-of-range glyph index surfaces the outline error (ok=false render).
 	if _, _, _, _, ok := fc.GlyphMaskIndex(99, 0, 0); ok {
 		t.Error("out-of-range CFF2 glyph should not render")
+	}
+}
+
+// --- Counter control (cntrmask) ---------------------------------------------
+
+// TestRecordCntrMask drives a cntrmask (operator 20) so the interpreter records
+// its selected stems as a counter-control group.
+func TestRecordCntrMask(t *testing.T) {
+	c := &csb{}
+	c.num(0).num(50).num(650).num(50).op(3) // vstem: 2 stems
+	c.op(20).raw(0x80)                      // cntrmask: only stem 0 selected
+	c.num(0).num(0).op(21)                  // rmoveto
+	c.op(14)                                // endchar
+	tbl := &cffTable{charStrings: [][]byte{c.b}, charstringType: 2}
+	_, gh, err := tbl.outlineHints(0)
+	if err != nil {
+		t.Fatalf("outlineHints: %v", err)
+	}
+	if len(gh.cntrGroups) != 1 || len(gh.cntrGroups[0]) != 1 || gh.cntrGroups[0][0] != 0 {
+		t.Fatalf("cntrGroups = %v want [[0]]", gh.cntrGroups)
+	}
+}
+
+// TestCounterControlEqualizesGaps grid-fits three vertical stems whose original
+// counters (gaps) are uneven and checks the cntrmask counter control chains them
+// at the rounded average gap.
+func TestCounterControlEqualizesGaps(t *testing.T) {
+	gh := &cffGlyphHints{
+		stems: []cffStemHint{
+			{horizontal: false, min: 0, max: 10},
+			{horizontal: false, min: 30, max: 40}, // gap 20 from stem0
+			{horizontal: false, min: 45, max: 55}, // gap 5 from stem1
+		},
+		cntrGroups: [][]int{{0, 1, 2}},
+	}
+	in := []contour{{
+		{x: 0, on: true}, {x: 10, on: true},
+		{x: 30, on: true}, {x: 40, on: true},
+		{x: 45, on: true}, {x: 55, on: true},
+	}}
+	out := cffGridFit(in, gh, 1, 100, false)
+	// avg gap = round((20+5)/2) = round(12.5) = 13, chained from stem0's edges.
+	want := []float64{0, 10, 23, 33, 46, 56}
+	for i, w := range want {
+		if math.Abs(out[0][i].x-w) > 1e-9 {
+			t.Errorf("point %d x = %v want %v", i, out[0][i].x, w)
+		}
+	}
+}
+
+// TestEqualizeCountersMinGap forces a group whose average counter rounds below
+// one pixel, so the equaliser clamps the gap to a whole pixel.
+func TestEqualizeCountersMinGap(t *testing.T) {
+	hs := []hintedStem{
+		{oLo: 0, oHi: 10, hLo: 0, hHi: 10},
+		{oLo: 10, oHi: 20, hLo: 10, hHi: 20}, // zero original counter
+	}
+	stems := []cffStemHint{{horizontal: false}, {horizontal: false}}
+	equalizeCounters(hs, stems, []int{0, 1}, false)
+	if hs[1].hLo != 11 || hs[1].hHi != 21 { // gap clamped to 1px
+		t.Fatalf("min-gap chain = %+v want hLo 11 hHi 21", hs[1])
+	}
+}
+
+// --- Mid-subpath hintmask changes -------------------------------------------
+
+// TestMidSubpathHintmask puts two hintmasks at different points of one contour so
+// the same x coordinate is hinted by different stems before and after the switch.
+func TestMidSubpathHintmask(t *testing.T) {
+	gh := &cffGlyphHints{
+		stems: []cffStemHint{
+			{horizontal: false, min: 3, max: 13},   // device 0.3..1.3 at scale 0.1
+			{horizontal: false, min: 100, max: 110}, // device 10..11
+		},
+		hintMasks: []cffHintMask{
+			{pointIndex: 0, active: []bool{true, false}}, // stem0 only
+			{pointIndex: 2, active: []bool{false, true}}, // switch to stem1 at point 2
+		},
+	}
+	in := []contour{{
+		{x: 100, on: true}, // point0: under stem0 mask -> rigid shift
+		{x: 3, on: true},   // point1: still stem0 mask
+		{x: 100, on: true}, // point2: now stem1 mask -> snaps to stem1 edge
+		{x: 110, on: true}, // point3: stem1 mask
+	}}
+	out := cffGridFit(in, gh, 0.1, 12, false)
+	// point0 (device 10) under stem0: above stem0's far edge (1.3->1), shift -0.3
+	// -> device 9.7 -> font 97.
+	if math.Abs(out[0][0].x-97) > 1e-6 {
+		t.Errorf("point0 x = %v want 97 (stem0 rigid shift)", out[0][0].x)
+	}
+	// point2 (device 10) under stem1: lands on stem1's grid-fitted edge -> font 100.
+	if math.Abs(out[0][2].x-100) > 1e-6 {
+		t.Errorf("point2 x = %v want 100 (stem1 snap)", out[0][2].x)
+	}
+}
+
+// --- Flex regions -----------------------------------------------------------
+
+// TestRecordFlexRange drives an hflex and checks its emitted point span is
+// recorded as a flexRange (entry anchor at start-1, exit anchor at end).
+func TestRecordFlexRange(t *testing.T) {
+	c := &csb{}
+	c.num(0).num(0).op(21)                                            // rmoveto (1 point)
+	c.num(10).num(5).num(10).num(-5).num(10).num(10).num(10).op(1234) // hflex (7 args)
+	c.op(14)
+	tbl := &cffTable{charStrings: [][]byte{c.b}, charstringType: 2}
+	_, gh, err := tbl.outlineHints(0)
+	if err != nil {
+		t.Fatalf("outlineHints: %v", err)
+	}
+	// hflex draws 2*cffCurveSteps points after the single moveto point.
+	if len(gh.flexRanges) != 1 || gh.flexRanges[0].start != 1 || gh.flexRanges[0].end != 2*cffCurveSteps {
+		t.Fatalf("flexRanges = %v want [{1 %d}]", gh.flexRanges, 2*cffCurveSteps)
+	}
+}
+
+// TestInterpolateFlex checks the interior-point interpolation both when the two
+// anchors span an original interval (x) and when they are degenerate (y).
+func TestInterpolateFlex(t *testing.T) {
+	pts := []hintPoint{
+		{ox: 0, hx: 1, oy: 2, hy: 2},   // entry anchor: x moved +1, y degenerate
+		{ox: 5, hx: 5, oy: 2, hy: 2},   // interior
+		{ox: 10, hx: 13, oy: 2, hy: 2}, // exit anchor: x moved +3
+	}
+	interpolateFlex(pts, 0, 2)
+	// x: dA=1, dB=3, t=0.5 -> 5 + 1 + 0.5*((13-10)-1) = 7.
+	if math.Abs(pts[1].hx-7) > 1e-9 {
+		t.Errorf("interior hx = %v want 7", pts[1].hx)
+	}
+	// y: oB==oA -> takes anchor A's (zero) delta -> unchanged.
+	if math.Abs(pts[1].hy-2) > 1e-9 {
+		t.Errorf("interior hy = %v want 2", pts[1].hy)
+	}
+}
+
+// TestCffGridFitFlexRegions covers the grid-fitter's flex loop: a flex whose
+// entry anchor is missing (start 0) is skipped, a well-formed flex interpolates.
+func TestCffGridFitFlexRegions(t *testing.T) {
+	gh := &cffGlyphHints{
+		flexRanges: []flexRange{{start: 0, end: 1}, {start: 2, end: 4}},
+	}
+	in := []contour{{
+		{x: 0, on: true}, {x: 1, on: true},
+		{x: 2, on: true}, {x: 3, on: true}, {x: 4, on: true},
+	}}
+	out := cffGridFit(in, gh, 1, 24, false)
+	// No stems -> identity remap; the flex interpolation is identity too.
+	for i := range in[0] {
+		if out[0][i].x != in[0][i].x {
+			t.Errorf("point %d x = %v want %v", i, out[0][i].x, in[0][i].x)
+		}
+	}
+}
+
+// --- Stem darkening ---------------------------------------------------------
+
+func TestStemDarkenPixels(t *testing.T) {
+	if stemDarkenPixels(0) != 0 {
+		t.Error("non-positive ppem should not darken")
+	}
+	if stemDarkenPixels(darkenMaxPPEM) != 0 || stemDarkenPixels(darkenMaxPPEM+10) != 0 {
+		t.Error("ppem at/above the cutoff should not darken")
+	}
+	if d := stemDarkenPixels(darkenMaxPPEM / 2); math.Abs(d-darkenMaxPixels/2) > 1e-9 {
+		t.Errorf("mid-range darkening = %v want %v", d, darkenMaxPixels/2)
+	}
+}
+
+// TestCffGridFitDarken widens a single stem's edges by the ppem-dependent amount.
+func TestCffGridFitDarken(t *testing.T) {
+	gh := &cffGlyphHints{stems: []cffStemHint{{horizontal: false, min: 0, max: 10}}}
+	in := []contour{{{x: 0, on: true}, {x: 10, on: true}}}
+	out := cffGridFit(in, gh, 1, darkenMaxPPEM/2, true) // d = darkenMaxPixels/2 = 0.075
+	if math.Abs(out[0][0].x-(-0.075)) > 1e-9 {
+		t.Errorf("darkened low edge = %v want -0.075", out[0][0].x)
+	}
+	if math.Abs(out[0][1].x-10.075) > 1e-9 {
+		t.Errorf("darkened high edge = %v want 10.075", out[0][1].x)
+	}
+}
+
+// TestStemDarkeningFace exercises the Face toggle: darkening changes the hinted
+// CFF outline, and turning it back off reproduces the undarkened result exactly.
+func TestStemDarkeningFace(t *testing.T) {
+	f := hintedCFFFont(t)
+	fc := f.NewFace(14)
+	fc.SetHinting(true)
+	base, err := fc.outline(1)
+	if err != nil {
+		t.Fatalf("hinted outline: %v", err)
+	}
+	fc.SetStemDarkening(true)
+	dark, err := fc.outline(1)
+	if err != nil {
+		t.Fatalf("darkened outline: %v", err)
+	}
+	if reflectContoursEqual(base, dark) {
+		t.Fatal("stem darkening did not change the outline")
+	}
+	fc.SetStemDarkening(false)
+	off, err := fc.outline(1)
+	if err != nil {
+		t.Fatalf("undarkened outline: %v", err)
+	}
+	if !reflectContoursEqual(base, off) {
+		t.Fatal("stem darkening off is not byte-identical to the undarkened result")
 	}
 }
 
