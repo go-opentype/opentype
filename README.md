@@ -75,8 +75,8 @@ swapping this in for the x/image face is mechanical.
 - **CFF and CFF2 outlines** — Type 2 charstrings, subroutines, `seac`
   accent composition, CFF2 variable-font blend operators
 - **Variable fonts** — `fvar` axes and named instances, `avar` axis-value
-  mapping, `gvar`/CFF2 glyph-outline interpolation, `MVAR` metric variation,
-  via `(*Face).SetVariation`
+  mapping, `gvar`/CFF2 glyph-outline interpolation, and `HVAR`/`VVAR`/`MVAR`
+  metric variation, via `(*Face).SetVariation`
 - **GSUB/GPOS shaping** — ligatures, contextual and positional-form
   substitution (`isol`/`init`/`medi`/`fina`), pair/single/cursive
   positioning, mark-to-base and mark-to-mark attachment
@@ -87,6 +87,18 @@ swapping this in for the x/image face is mechanical.
   `SetStemDarkening`
 - **Vertical metrics** — `vhea`/`vmtx`/`VORG`-aware vertical advances and
   origins for vertical writing modes
+- **OpenType `MATH` table** — math-typesetting metrics (constants, per-glyph
+  italic correction / top-accent attachment / four-corner kerning, and
+  stretchy-glyph size variants and assemblies), exposed pixel-scaled through
+  a `Face`
+- **Font descriptors** — the OS/2- and `head`/`post`-derived scalars a PDF
+  `/FontDescriptor` or CSS `@font-face` needs (`Ascent`, `Descent`,
+  `FontBBox`, `CapHeight`, `XHeight`, `ItalicAngle`, `WeightClass`,
+  `WidthClass`, `StemV`, `Flags`, `IsFixedPitch`/`IsItalic`/`IsSerif`)
+- **Subsetting & instancing** — `SubsetTrueType`/`SubsetCFF` cut a font down
+  to a glyph set (closing composite/`seac` dependencies and remapping ids),
+  and `Instance`/`InstanceBytes` bake a variable font to a static instance —
+  the writer side needed to embed fonts in PDFs
 - **Anti-aliased rasterisation** via 4×4 supersampling under the non-zero
   winding rule
 
@@ -116,6 +128,12 @@ caches rasterised glyphs and is **not** safe for concurrent use; build one
 | `(*Face).SetVariation(coords map[string]float64)` | Instance a variable font at the given axis coordinates. |
 | `(*Face).SetHinting(on bool)` / `(*Face).SetStemDarkening(on bool)` | Toggle the TrueType/CFF hinter. |
 | `(*Face).VerticalAdvance(r rune) int` / `(*Face).VerticalOrigin(r rune) (int, bool)` | Vertical writing-mode metrics. |
+| `(*Font).HasMath() bool` | Whether the font carries an OpenType `MATH` table. |
+| `(*Face).MathConstant(w MathConstant) int` / `(*Face).ItalicCorrection(g GlyphIndex) int` / `(*Face).MathVariants(g, vertical) ([]MathVariant, *MathAssembly)` | Pixel-scaled `MATH`-table metrics for a math-layout engine. |
+| `(*Font).Ascent/Descent/LineGap/FontBBox/CapHeight/XHeight/ItalicAngle/WeightClass/WidthClass/StemV/Flags/IsFixedPitch/IsItalic/IsSerif` | Font-descriptor scalars for PDF `/FontDescriptor` and CSS `@font-face`. |
+| `(*Font).Instance(coords map[string]float64) (*Font, error)` / `(*Font).InstanceBytes(coords) ([]byte, error)` | Bake a variable font to a static instance (as a `*Font` or a new sfnt blob). |
+| `(*Font).SubsetTrueType(gids []GlyphIndex) ([]byte, map[GlyphIndex]GlyphIndex, error)` | Cut a TrueType font to a glyph set, closing composites and returning the old→new id map. |
+| `(*Font).SubsetCFF(gids []GlyphIndex) ([]byte, error)` | Cut a CFF/OTTO font to a glyph set (closing `seac` accents). |
 
 See [`example_test.go`](./example_test.go) for runnable examples of each of
 these, and `go doc github.com/go-opentype/opentype` for the full reference.
@@ -124,12 +142,18 @@ these, and `go doc github.com/go-opentype/opentype` for the full reference.
 
 - sfnt container (`0x00010000` and `true` TrueType magics, `OTTO` CFF magic)
 - `head`, `maxp`, `hhea`, `hmtx` (including the trailing-run shared advance)
-- `cmap` formats **4** (BMP) and **12** (full Unicode), preferring 12, plus
-  format **14** (Unicode variation sequences)
+- `cmap` formats **0, 2, 4, 6, 8, 10, 12, 13** and **14** (Unicode variation
+  sequences), preferring the richest available (12/13 over 4/6)
 - `loca` (short and long), `glyf` simple and composite TrueType glyphs
 - CFF and CFF2 (`OTTO`) Type 2 charstring outlines, including `seac`
-- `fvar`/`avar`/`gvar`/`MVAR` and CFF2 blends for variable fonts
+- `fvar`/`avar`/`gvar`/`HVAR`/`VVAR`/`MVAR` and CFF2 blends for variable
+  fonts, plus `Instance`/`InstanceBytes` to bake a static instance
 - `GSUB`/`GPOS`/`GDEF`, the legacy `kern` table
+- OS/2 + `head`/`post` **font-descriptor** scalars (`Ascent`, `Descent`,
+  `FontBBox`, `CapHeight`, `XHeight`, `ItalicAngle`, `WeightClass`,
+  `WidthClass`, `StemV`, `Flags`, …) for PDF/CSS embedding
+- **subsetting** — `SubsetTrueType` (glyf, composite-closure aware, with an
+  old→new id map) and `SubsetCFF` (`seac`-closure aware)
 - the OpenType **`MATH`** table — math-typesetting metrics (constants, per-glyph
   italic correction / top-accent attachment / corner kerning, and stretchy-glyph
   size variants and assemblies), exposed pixel-scaled through a `Face`
@@ -171,8 +195,9 @@ of a dependency-free text stack:
 - **[shape](https://github.com/go-opentype/shape)** — a HarfBuzz-lite
   complex-script shaper (Arabic, Indic, Hangul, USE, Egyptian
   hieroglyphs, ...) built on this package's GSUB/GPOS engine.
-- **[fonts](https://github.com/go-opentype/fonts)** — 36 bundled OFL/BSD
-  font families, per-family lazily `go:embed`-ed, ready to feed to `Parse`.
+- **[fonts](https://github.com/go-opentype/fonts)** — 46 bundled OFL/BSD
+  font families (Latin, non-Latin scripts and CJK), per-family lazily
+  `go:embed`-ed, ready to feed to `Parse`.
 
 ## License
 
