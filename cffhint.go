@@ -136,6 +136,8 @@ type cffPrivate struct {
 	stdVW            float64   // standard vertical-stem width (vstem)
 	stemSnapH        []float64 // horizontal-stem snap widths
 	stemSnapV        []float64 // vertical-stem snap widths
+	defaultWidthX    float64   // the advance of a glyph whose charstring gives none
+	nominalWidthX    float64   // what a charstring's width is measured from
 }
 
 // CFF Private-DICT defaults for the overshoot-control parameters (CFF spec).
@@ -181,6 +183,12 @@ func parsePrivateHints(d map[int][]float64) *cffPrivate {
 	}
 	p.stemSnapH = accumDelta(d[1212])
 	p.stemSnapV = accumDelta(d[1213])
+	if v, ok := d[20]; ok && len(v) > 0 {
+		p.defaultWidthX = v[0]
+	}
+	if v, ok := d[21]; ok && len(v) > 0 {
+		p.nominalWidthX = v[0]
+	}
 	return p
 }
 

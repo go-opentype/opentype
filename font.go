@@ -34,15 +34,16 @@ type Font struct {
 	loca             []uint32
 	glyf             []byte
 	cmap             cmapLookup
-	cmapVS           *cmap14    // format-14 Unicode Variation Sequences subtable, if present
-	cff              *cffTable  // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
-	cff2             *cff2Table // CFF2 (variable Compact Font Format) outlines, if present
-	fvar             *fvarTable // optional: variation axes and named instances
-	avar             *avarTable // optional: axis-value segment maps
-	gvar             *gvarTable // optional: glyph variation (delta) data
-	hvar             *hvarTable // optional: horizontal metrics variation (advances)
-	vvar             *vvarTable // optional: vertical metrics variation (advances)
-	mvar             *mvarTable // optional: global font-metric variation
+	cmapVS           *cmap14               // format-14 Unicode Variation Sequences subtable, if present
+	cff              *cffTable             // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
+	glyphNames       map[string]GlyphIndex // what the font calls its glyphs, when it names them
+	cff2             *cff2Table            // CFF2 (variable Compact Font Format) outlines, if present
+	fvar             *fvarTable            // optional: variation axes and named instances
+	avar             *avarTable            // optional: axis-value segment maps
+	gvar             *gvarTable            // optional: glyph variation (delta) data
+	hvar             *hvarTable            // optional: horizontal metrics variation (advances)
+	vvar             *vvarTable            // optional: vertical metrics variation (advances)
+	mvar             *mvarTable            // optional: global font-metric variation
 
 	// OpenType Layout tables, all optional. Absence is not an error.
 	gdef *gdefTable // glyph definitions (classes, mark sets) for lookup flags
