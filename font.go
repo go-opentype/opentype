@@ -36,6 +36,7 @@ type Font struct {
 	cmap             cmapLookup
 	cmapVS           *cmap14               // format-14 Unicode Variation Sequences subtable, if present
 	cff              *cffTable             // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
+	t1               *type1Font            // PostScript Type 1 outlines, for a program read by ParseType1
 	glyphNames       map[string]GlyphIndex // what the font calls its glyphs, when it names them
 	cff2             *cff2Table            // CFF2 (variable Compact Font Format) outlines, if present
 	fvar             *fvarTable            // optional: variation axes and named instances

@@ -167,6 +167,9 @@ func (f *Font) buildNames() {
 // not name its glyphs — a TrueType font usually does not, and a CFF font
 // addressed by character identifier never does.
 func (f *Font) GlyphName(gid GlyphIndex) (string, bool) {
+	if f.t1 != nil {
+		return f.t1.glyphName(int(gid))
+	}
 	if f.cff == nil || f.cff.isCID {
 		return "", false
 	}
@@ -185,6 +188,9 @@ func (f *Font) GlyphIndexByName(name string) (GlyphIndex, bool) {
 // ok is false for a font that carries no such encoding, which is every
 // TrueType font and every CFF font addressed by character identifier.
 func (f *Font) GlyphIndexByCode(code byte) (GlyphIndex, bool) {
+	if f.t1 != nil {
+		return f.t1.glyphByCode(code)
+	}
 	if f.cff == nil || f.cff.isCID {
 		return 0, false
 	}
