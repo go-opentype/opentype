@@ -967,6 +967,12 @@ func (m *t2machine) escape(b1 byte) error {
 			x6, y6 = sx, y5+s[10]
 		}
 		m.curveTo(x4, y4, x5, y5, x6, y6)
+	case 0:
+		// dotsection: a Type 1 hint operator that says a dot stands alone.
+		// It has no meaning here, but fonts converted from Type 1 still
+		// carry it — and refusing it takes the dot off every i, j, colon and
+		// semicolon in such a font, which is exactly what it was found doing.
+		m.clear()
 	default:
 		return fmt.Errorf("opentype: cff: unknown escape operator %d", b1)
 	}
