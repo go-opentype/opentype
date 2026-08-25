@@ -220,6 +220,11 @@ func (fc *Face) GlyphMaskIndex(gid GlyphIndex, x, y int) (bounds image.Rectangle
 // SetHinting affects all three outline flavours; with hinting off they are
 // returned unhinted.
 func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
+	if fc.font.t1 != nil {
+		// A Type 1 program carries hints of its own, in a form nothing here
+		// grid-fits; its outlines are drawn as they were written.
+		return fc.font.t1.outline(int(gid))
+	}
 	if fc.font.cff2 != nil {
 		contours, gh, err := fc.font.cff2.outlineHints(int(gid), fc.font.NormalizeCoords(fc.varCoords))
 		if err != nil {
