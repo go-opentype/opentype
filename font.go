@@ -123,7 +123,8 @@ const (
 // slice is retained (not copied) and must not be mutated by the caller.
 //
 // It fails on a corrupt or unsupported container: a bad sfnt magic, truncated
-// data, or a missing required table. All three outline flavours are supported:
+// data, or a missing required table — which does not include the character
+// map: see [Font.HasCharacterMap]. All three outline flavours are supported:
 // TrueType ('glyf'/'loca'), CFF/OpenType (a "OTTO" sfnt, or any sfnt carrying a
 // 'CFF ' table, decoded via cff.go) and variable CFF2 (a sfnt carrying a 'CFF2'
 // table, decoded via cff2.go).
@@ -163,7 +164,12 @@ func Parse(b []byte) (*Font, error) {
 	_, hasCFF := tables["CFF "]
 	_, hasCFF2 := tables["CFF2"]
 	isCFF := version == versionOTTO || hasCFF || hasCFF2
-	required := []string{"head", "maxp", "hhea", "hmtx", "cmap"}
+	// A 'cmap' is not among them. A font embedded in a PDF as a CIDFontType2
+	// is addressed by glyph number through the document's own map, and the
+	// subset that is embedded routinely leaves its character map out; refusing
+	// such a font would leave every glyph in it undrawable for want of a table
+	// nothing was going to consult.
+	required := []string{"head", "maxp", "hhea", "hmtx"}
 	switch {
 	case hasCFF2:
 		required = append(required, "CFF2")
@@ -210,8 +216,10 @@ func Parse(b []byte) (*Font, error) {
 		}
 		f.glyf = tables["glyf"]
 	}
-	if err := f.parseCmap(tables["cmap"]); err != nil {
-		return nil, err
+	if cm, ok := tables["cmap"]; ok {
+		if err := f.parseCmap(cm); err != nil {
+			return nil, err
+		}
 	}
 	// Optional TrueType instruction tables. Absence is not an error; it just
 	// means the font carries no hinting program (see hint.go).
@@ -304,10 +312,20 @@ func (f *Font) parseCvt(b []byte) {
 func (f *Font) NumGlyphs() int { return f.numGlyphs }
 
 // GlyphIndex maps a rune to its glyph index via the selected cmap subtable.
-// ok is false when the rune has no glyph in that subtable.
+// ok is false when the rune has no glyph in that subtable, and for a font that
+// carries no character map at all — one addressed by glyph number, which
+// [Font.HasCharacterMap] reports.
 func (f *Font) GlyphIndex(r rune) (GlyphIndex, bool) {
+	if f.cmap == nil {
+		return 0, false
+	}
 	return f.cmap.lookup(r)
 }
+
+// HasCharacterMap reports whether the font can say which glyph a rune is. A
+// font subset embedded in a PDF as a CIDFontType2 usually cannot: the document
+// carries that map instead, and the font is addressed by glyph number.
+func (f *Font) HasCharacterMap() bool { return f.cmap != nil }
 
 // GlyphIndexVariation resolves a Unicode variation sequence (a base rune
 // followed by a variation selector) to a glyph index, using the font's
