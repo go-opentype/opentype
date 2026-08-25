@@ -583,7 +583,7 @@ func TestEqualizeCountersMinGap(t *testing.T) {
 func TestMidSubpathHintmask(t *testing.T) {
 	gh := &cffGlyphHints{
 		stems: []cffStemHint{
-			{horizontal: false, min: 3, max: 13},   // device 0.3..1.3 at scale 0.1
+			{horizontal: false, min: 3, max: 13},    // device 0.3..1.3 at scale 0.1
 			{horizontal: false, min: 100, max: 110}, // device 10..11
 		},
 		hintMasks: []cffHintMask{
