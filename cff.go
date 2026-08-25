@@ -30,6 +30,47 @@ type cffTable struct {
 	charstringType int
 	sidToGid       map[int]int // charset: string id -> glyph id (for seac)
 	priv           *cffPrivate // Private-DICT hint parameters (blue zones, std widths)
+
+	// What a font addressed by name rather than by number needs: the font's
+	// own strings, which glyph each one names, and the built-in encoding that
+	// says which glyph a byte stands for.
+	strings    [][]byte
+	gidToSID   []int
+	encoding   map[byte]int // code -> glyph id; nil means the standard one
+	fontMatrix [6]float64
+	isCID      bool
+}
+
+// glyphName is what the font calls a glyph: one of the names every CFF font
+// shares, or one of its own.
+func (c *cffTable) glyphName(gid int) (string, bool) {
+	if gid < 0 || gid >= len(c.gidToSID) {
+		return "", false
+	}
+	sid := c.gidToSID[gid]
+	if sid < nStdStrings {
+		return cffStandardStrings[sid], true
+	}
+	i := sid - nStdStrings
+	if i >= len(c.strings) {
+		return "", false
+	}
+	return string(c.strings[i]), true
+}
+
+// glyphByCode maps a byte to a glyph through the font's own encoding, which is
+// the Standard Encoding unless the font said otherwise.
+func (c *cffTable) glyphByCode(code byte) (int, bool) {
+	if c.encoding != nil {
+		gid, ok := c.encoding[code]
+		return gid, ok
+	}
+	sid, ok := standardEncodingSID(int(code))
+	if !ok {
+		return 0, false
+	}
+	gid, ok := c.sidToGid[int(sid)]
+	return gid, ok
 }
 
 // maxT2Depth bounds callsubr/callgsubr recursion; deeper nesting is rejected as
@@ -243,7 +284,8 @@ func parseCFF(data []byte) (*cffTable, error) {
 	if len(topDicts) < 1 {
 		return nil, fmt.Errorf("opentype: cff: empty Top DICT INDEX")
 	}
-	if _, err := parseIndex(r); err != nil { // String INDEX
+	strs, err := parseIndex(r) // String INDEX
+	if err != nil {
 		return nil, err
 	}
 	gsubrs, err := parseIndex(r) // Global Subr INDEX
@@ -287,7 +329,7 @@ func parseCFF(data []byte) (*cffTable, error) {
 		return nil, err
 	}
 
-	return &cffTable{
+	c := &cffTable{
 		charStrings:    charStrings,
 		globalSubrs:    gsubrs,
 		localSubrs:     localSubrs,
@@ -296,7 +338,94 @@ func parseCFF(data []byte) (*cffTable, error) {
 		charstringType: cst,
 		sidToGid:       sidToGid,
 		priv:           priv,
-	}, nil
+		strings:        strs,
+		fontMatrix:     fontMatrix(top),
+	}
+	_, c.isCID = top[1230] // ROS: the font is addressed by identifier, not by name
+	c.gidToSID = make([]int, len(charStrings))
+	for sid, gid := range sidToGid {
+		if gid >= 0 && gid < len(c.gidToSID) {
+			c.gidToSID[gid] = sid
+		}
+	}
+	if encOff, ok := dictInt(top, 16, 0); ok {
+		if c.encoding, err = parseCFFEncoding(data, encOff, c); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+// defaultFontMatrix is the one nearly every CFF font has: a thousand units to
+// the em.
+var defaultFontMatrix = [6]float64{0.001, 0, 0, 0.001, 0, 0}
+
+// fontMatrix reads the Top DICT's FontMatrix, which is what says how big the
+// font's own units are.
+func fontMatrix(top map[int][]float64) [6]float64 {
+	v, ok := top[1207]
+	if !ok || len(v) < 6 {
+		return defaultFontMatrix
+	}
+	var m [6]float64
+	copy(m[:], v[:6])
+	if m[0] == 0 {
+		return defaultFontMatrix
+	}
+	return m
+}
+
+// parseCFFEncoding decodes the built-in encoding (Top DICT operator 16): which
+// glyph each byte stands for. Offsets 0 and 1 name the two predefined ones;
+// the standard one is what a nil map means, and the expert one is rare enough
+// that it is read as standard rather than refused.
+func parseCFFEncoding(data []byte, off int, c *cffTable) (map[byte]int, error) {
+	if off <= 1 {
+		return nil, nil
+	}
+	if off >= len(data) {
+		return nil, fmt.Errorf("opentype: cff encoding offset out of range")
+	}
+	r := &reader{b: data, pos: off}
+	format := r.u8()
+	out := map[byte]int{}
+	switch format &^ 0x80 {
+	case 0:
+		n := int(r.u8())
+		for gid := 1; gid <= n; gid++ {
+			out[r.u8()] = gid
+		}
+	case 1:
+		nRanges := int(r.u8())
+		gid := 1
+		for i := 0; i < nRanges; i++ {
+			first := int(r.u8())
+			nLeft := int(r.u8())
+			for k := 0; k <= nLeft; k++ {
+				if code := first + k; code < 256 {
+					out[byte(code)] = gid
+				}
+				gid++
+			}
+		}
+	default:
+		return nil, fmt.Errorf("opentype: cff encoding: unsupported format %d", format&^0x80)
+	}
+	if format&0x80 != 0 {
+		// Supplements name extra codes by string id rather than by glyph.
+		nSups := int(r.u8())
+		for i := 0; i < nSups; i++ {
+			code := r.u8()
+			sid := int(r.u16())
+			if gid, ok := c.sidToGid[sid]; ok {
+				out[code] = gid
+			}
+		}
+	}
+	if r.err != nil {
+		return nil, fmt.Errorf("opentype: cff encoding: %w", r.err)
+	}
+	return out, nil
 }
 
 // parseCharset decodes the CFF charset (Top DICT operator 15) into a string-id

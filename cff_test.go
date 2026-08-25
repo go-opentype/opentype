@@ -6,6 +6,7 @@ package opentype
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -485,14 +486,20 @@ func dictOperator(op int) []byte {
 
 // cffOptions configures the synthetic CFF builder.
 type cffOptions struct {
-	glyphs      [][]byte
-	gsubrs      [][]byte
-	lsubrs      [][]byte
-	includePriv bool
-	charType    int    // 0 -> omit CharstringType operator
-	omitCharStr bool   // omit the CharStrings operator entirely
-	charsetSIDs []int  // when non-nil, emit a format-0 charset (SID per glyph 1..n-1)
-	privExtra   []byte // extra Private-DICT bytes (hint params) placed before Subrs
+	glyphs                 [][]byte
+	gsubrs                 [][]byte
+	lsubrs                 [][]byte
+	includePriv            bool
+	charType               int      // 0 -> omit CharstringType operator
+	omitCharStr            bool     // omit the CharStrings operator entirely
+	charsetSIDs            []int    // when non-nil, emit a format-0 charset (SID per glyph 1..n-1)
+	privExtra              []byte   // extra Private-DICT bytes (hint params) placed before Subrs
+	strings                []string // the font's own names, string ids 391 upwards
+	encoding               []byte   // when non-nil, a built-in encoding laid out after the charset
+	encodingOff            int      // which predefined encoding to name, with the flag below
+	namePredefinedEncoding bool
+	fontMatrix             []float64
+	ros                    bool // the font is addressed by character identifier
 }
 
 // cffCharset0 encodes a format-0 charset: one uint16 string id per glyph 1..n-1
@@ -513,7 +520,11 @@ func cffCharset0(sids []int) []byte {
 func buildCFF(o cffOptions) []byte {
 	header := []byte{1, 0, 4, 1}
 	name := cffIndex([][]byte{[]byte("SYNTH")})
-	strIdx := cffIndex(nil)
+	var strItems [][]byte
+	for _, str := range o.strings {
+		strItems = append(strItems, []byte(str))
+	}
+	strIdx := cffIndex(strItems)
 	gsubrIdx := cffIndex(o.gsubrs)
 	csIdx := cffIndex(o.glyphs)
 
@@ -533,8 +544,30 @@ func buildCFF(o cffOptions) []byte {
 		charsetData = cffCharset0(o.charsetSIDs)
 	}
 
-	encodeTop := func(csOff, privOff, charsetOff int) []byte {
+	encodeTop := func(csOff, privOff, charsetOff, encOff int) []byte {
 		var td []byte
+		if o.ros {
+			// ROS takes three operands; the two string ids stand for names
+			// this test never reads.
+			td = append(td, dictLong(391)...)
+			td = append(td, dictLong(392)...)
+			td = append(td, dictLong(0)...)
+			td = append(td, dictOperator(1230)...)
+		}
+		if len(o.fontMatrix) == 6 {
+			for _, v := range o.fontMatrix {
+				td = append(td, dictReal(v)...)
+			}
+			td = append(td, dictOperator(1207)...)
+		}
+		switch {
+		case o.encoding != nil:
+			td = append(td, dictLong(encOff)...)
+			td = append(td, dictOperator(16)...)
+		case o.encodingOff >= 0 && o.namePredefinedEncoding:
+			td = append(td, dictLong(o.encodingOff)...)
+			td = append(td, dictOperator(16)...)
+		}
 		if !o.omitCharStr {
 			td = append(td, dictLong(csOff)...)
 			td = append(td, dictOperator(17)...)
@@ -556,12 +589,13 @@ func buildCFF(o cffOptions) []byte {
 	}
 
 	// Pass 1: measure the Top DICT INDEX length using placeholder offsets.
-	topLen := len(cffIndex([][]byte{encodeTop(0, 0, 0)}))
+	topLen := len(cffIndex([][]byte{encodeTop(0, 0, 0, 0)}))
 	csOff := len(header) + len(name) + topLen + len(strIdx) + len(gsubrIdx)
 	privOff := csOff + len(csIdx)
 	charsetOff := privOff + len(privDict) + len(lsubrIdx)
+	encOff := charsetOff + len(charsetData)
 	// Pass 2: real offsets (same lengths, fixed-width encoding).
-	topIdx := cffIndex([][]byte{encodeTop(csOff, privOff, charsetOff)})
+	topIdx := cffIndex([][]byte{encodeTop(csOff, privOff, charsetOff, encOff)})
 
 	out := append([]byte{}, header...)
 	out = append(out, name...)
@@ -572,6 +606,41 @@ func buildCFF(o cffOptions) []byte {
 	out = append(out, privDict...)
 	out = append(out, lsubrIdx...)
 	out = append(out, charsetData...)
+	out = append(out, o.encoding...)
+	return out
+}
+
+// dictReal encodes a real number the way a DICT carries one: nibbles, ending
+// in the terminator. It is what a FontMatrix needs, since its entries are not
+// whole numbers.
+func dictReal(v float64) []byte {
+	s := strconv.FormatFloat(v, 'g', -1, 64)
+	nibbles := []byte{}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			nibbles = append(nibbles, c-'0')
+		case c == '.':
+			nibbles = append(nibbles, 0xa)
+		case c == '-':
+			nibbles = append(nibbles, 0xe)
+		case c == 'e':
+			if i+1 < len(s) && s[i+1] == '-' {
+				nibbles = append(nibbles, 0xc)
+				i++
+			} else {
+				nibbles = append(nibbles, 0xb)
+			}
+		}
+	}
+	nibbles = append(nibbles, 0xf)
+	if len(nibbles)%2 == 1 {
+		nibbles = append(nibbles, 0xf)
+	}
+	out := []byte{30}
+	for i := 0; i < len(nibbles); i += 2 {
+		out = append(out, nibbles[i]<<4|nibbles[i+1])
+	}
 	return out
 }
 
