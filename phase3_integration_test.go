@@ -50,9 +50,9 @@ func TestCFF2OTTOEndToEnd(t *testing.T) {
 	// default (100,100), moving to (100,400) as wght rises to its maximum.
 	empty := &csb{}
 	g := &csb{}
-	g.num(100).num(100).num(0).num(300).num(2).op(16)             // blend [x=100, y=100] with deltas [0, 300]
-	g.op(21)                                                      // rmoveto
-	g.num(200).num(0).num(0).num(200).num(-200).num(0).op(5)      // rlineto: close a 200x200 box
+	g.num(100).num(100).num(0).num(300).num(2).op(16)        // blend [x=100, y=100] with deltas [0, 300]
+	g.op(21)                                                 // rmoveto
+	g.num(200).num(0).num(0).num(200).num(-200).num(0).op(5) // rlineto: close a 200x200 box
 	tables := cff2OTTOTables([][]byte{empty.b, g.b}, vstore,
 		map[rune]uint16{'A': 1}, map[string][]byte{"fvar": buildFvar(wghtAxis(), nil, false)})
 

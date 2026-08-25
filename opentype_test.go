@@ -1241,3 +1241,44 @@ func TestErrorsUnwrap(t *testing.T) {
 		t.Errorf("short header should wrap errTruncated")
 	}
 }
+
+func TestAFontWithNoCharacterMap(t *testing.T) {
+	// A font subset embedded in a PDF as a CIDFontType2 is addressed by glyph
+	// number through the document's own map, and routinely carries no 'cmap'
+	// of its own. It has to parse: refusing it would leave every glyph in it
+	// undrawable for want of a table nothing was going to consult.
+	tb := stdTables(false, false)
+	delete(tb, "cmap")
+	f, err := Parse(assemble(versionTrueType, tb))
+	if err != nil {
+		t.Fatalf("a font with no character map was refused: %v", err)
+	}
+	if f.HasCharacterMap() {
+		t.Error("a font with no character map says it has one")
+	}
+	if gid, ok := f.GlyphIndex('A'); ok || gid != 0 {
+		t.Errorf("GlyphIndex('A') = %d, %v on a font with no character map", gid, ok)
+	}
+	if _, ok := f.GlyphIndexVariation('A', 0xFE00); ok {
+		t.Error("a variation was resolved on a font with no character map")
+	}
+	// What the font is for still works: glyphs by number.
+	if n := f.NumGlyphs(); n != 11 {
+		t.Fatalf("NumGlyphs() = %d", n)
+	}
+	face := f.NewFace(f.UnitsPerEm())
+	drawn := 0
+	for gid := 0; gid < f.NumGlyphs(); gid++ {
+		segs, ok := face.GlyphOutline(GlyphIndex(gid))
+		if ok && len(segs) > 0 {
+			drawn++
+		}
+	}
+	if drawn == 0 {
+		t.Error("no glyph of a font with no character map could be drawn")
+	}
+	// And one that does carry a character map still says so.
+	if !mustParse(t, stdBytes(false, false)).HasCharacterMap() {
+		t.Error("a font with a character map says it has none")
+	}
+}

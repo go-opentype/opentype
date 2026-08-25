@@ -419,10 +419,10 @@ func TestGvarAdvanceFallbackEdges(t *testing.T) {
 	}
 	// A simple-glyph header whose body is truncated (simpleGlyph fails).
 	badGlyf := &bw{}
-	badGlyf.i16(1)   // one contour
-	badGlyf.bbox()   // 8 bytes
-	badGlyf.u16(0)   // endPtsOfContours[0] = 0 -> 1 point
-	badGlyf.u16(0)   // instructionLength
+	badGlyf.i16(1) // one contour
+	badGlyf.bbox() // 8 bytes
+	badGlyf.u16(0) // endPtsOfContours[0] = 0 -> 1 point
+	badGlyf.u16(0) // instructionLength
 	// no flags/coords follow -> truncated
 	h := &Font{
 		gvar: &gvarTable{axisCount: 1, dataOffsets: []uint32{0, 4}},
