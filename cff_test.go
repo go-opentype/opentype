@@ -1054,3 +1054,70 @@ func TestErrTruncatedIsWrapped(t *testing.T) {
 		t.Fatalf("err = %v, want errTruncated", err)
 	}
 }
+
+func TestAnIdentifierReachesItsGlyphThroughTheCharset(t *testing.T) {
+	// A font addressed by identifier does not say anywhere that identifier N
+	// is glyph N. Its charset lists, for each glyph in order, the identifier
+	// it stands for — and taking one for the other draws the wrong glyph
+	// rather than none, which is the worse of the two failures.
+	//
+	// Four glyphs, whose identifiers are 0, 40, 41 and 42: nothing like the
+	// glyph numbers 0, 1, 2 and 3.
+	b := buildCFF(cffOptions{
+		glyphs:      [][]byte{{14}, {14}, {14}, {14}},
+		charsetSIDs: []int{40, 41, 42},
+		ros:         true,
+		strings:     []string{"Adobe", "Japan1"},
+	})
+	f, err := ParseCFF(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.IsCIDKeyed() {
+		t.Fatal("a font with a registry and an ordering is not addressed by identifier")
+	}
+	for cid, want := range map[int]GlyphIndex{40: 1, 41: 2, 42: 3} {
+		got, ok := f.GlyphIndexByCID(cid)
+		if !ok || got != want {
+			t.Errorf("identifier %d reached glyph %d (%v), wanted %d", cid, got, ok, want)
+		}
+	}
+	// And the identifiers the font does not name reach nothing, rather than
+	// reaching whichever glyph happens to have that number.
+	for _, cid := range []int{1, 2, 3, 39, 43, 9999, -1} {
+		if got, ok := f.GlyphIndexByCID(cid); ok {
+			t.Errorf("identifier %d reached glyph %d, and the font does not name it", cid, got)
+		}
+	}
+}
+
+func TestAFontNotAddressedByIdentifierReachesNothingThatWay(t *testing.T) {
+	// A CFF addressed by name has a charset too, but it lists names rather
+	// than identifiers, and reading it as identifiers would be nonsense.
+	b := buildCFF(cffOptions{
+		glyphs:      [][]byte{{14}, {14}},
+		charsetSIDs: []int{40},
+	})
+	f, err := ParseCFF(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.IsCIDKeyed() {
+		t.Error("a font addressed by name says it is addressed by identifier")
+	}
+	if _, ok := f.GlyphIndexByCID(40); ok {
+		t.Error("a font addressed by name answered to an identifier")
+	}
+}
+
+func TestAFontWithNoCFFAtAllIsNotAddressedByIdentifier(t *testing.T) {
+	// Every other sort of font program answers no to both questions rather
+	// than crashing on a field it has not got.
+	f := &Font{}
+	if f.IsCIDKeyed() {
+		t.Error("a font with no CFF says it is addressed by identifier")
+	}
+	if _, ok := f.GlyphIndexByCID(0); ok {
+		t.Error("a font with no CFF answered to an identifier")
+	}
+}
