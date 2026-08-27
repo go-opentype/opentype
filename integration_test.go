@@ -186,6 +186,41 @@ func TestFaceKernGPOS(t *testing.T) {
 	if fc.Kern('Z', 'B') != 0 || fc.Kern('A', 'Z') != 0 {
 		t.Error("Kern with an unmapped rune should be 0")
 	}
+
+	// The font-unit accessors return the unrounded adjustment; at scale 1 they
+	// equal the pixel value, and Kern is exactly their scaled, rounded form.
+	if got := fc.KernUnits('A', 'B'); got != -200 {
+		t.Errorf("KernUnits('A','B') = %v want -200", got)
+	}
+	if got := fc.KernIndexUnits(1, 2); got != -200 {
+		t.Errorf("KernIndexUnits(1,2) = %v want -200", got)
+	}
+	// Unmapped runes yield no kerning through KernUnits too (both branches).
+	if fc.KernUnits('Z', 'B') != 0 || fc.KernUnits('A', 'Z') != 0 {
+		t.Error("KernUnits with an unmapped rune should be 0")
+	}
+}
+
+// TestFaceKernSubPixel is the regression guard for the width-inflation bug: at
+// (or near) the font's own em a whole-pixel Kern quantises the pair adjustment
+// to zero, over-widening kern-rich text, while KernUnits keeps the real value a
+// text engine needs. The kern of -30 units at a 10px face (scale 0.01) is
+// -0.30px, which Kern rounds to 0; KernUnits reports the true -30 units.
+func TestFaceKernSubPixel(t *testing.T) {
+	f := makeFont(t, [][]byte{nil, squareGlyph(), squareGlyph()},
+		map[rune]uint16{'A': 1, 'B': 2},
+		map[string][]byte{"GPOS": kernGPOS(1, 2, -30)})
+	fc := f.NewFace(10) // scale 0.01: one pixel is a whole em/100 quantum
+	if k := fc.Kern('A', 'B'); k != 0 {
+		t.Errorf("Kern at 10px = %d, want 0 (the quantisation the bug exposed)", k)
+	}
+	if u := fc.KernUnits('A', 'B'); u != -30 {
+		t.Errorf("KernUnits at 10px = %v, want -30 (unrounded font units)", u)
+	}
+	// Kern is exactly the scaled, rounded KernUnits — the documented relation.
+	if got, want := fc.Kern('A', 'B'), roundInt(fc.KernUnits('A', 'B')*fc.Scale()); got != want {
+		t.Errorf("Kern = %d, want roundInt(KernUnits*scale) = %d", got, want)
+	}
 }
 
 func TestFaceKernLegacyTable(t *testing.T) {
@@ -196,8 +231,16 @@ func TestFaceKernLegacyTable(t *testing.T) {
 	if f.kern == nil || f.gpos != nil {
 		t.Fatalf("expected kern-only font: kern=%v gpos=%v", f.kern != nil, f.gpos != nil)
 	}
-	if k := f.NewFace(1000).Kern('A', 'B'); k != -50 {
+	fc := f.NewFace(1000)
+	if k := fc.Kern('A', 'B'); k != -50 {
 		t.Errorf("legacy Kern('A','B') = %d want -50", k)
+	}
+	// The font-unit accessors read through to the legacy table as well.
+	if got := fc.KernUnits('A', 'B'); got != -50 {
+		t.Errorf("legacy KernUnits('A','B') = %v want -50", got)
+	}
+	if got := fc.KernIndexUnits(1, 2); got != -50 {
+		t.Errorf("legacy KernIndexUnits(1,2) = %v want -50", got)
 	}
 }
 

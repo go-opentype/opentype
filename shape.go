@@ -98,7 +98,39 @@ func (fc *Face) ShapePositioned(text string, features ...string) []PositionedGly
 // prev and r, in whole pixels at the face's size. GPOS pair positioning is
 // preferred; the legacy kern table is used as a fallback. It is zero when either
 // rune is unmapped or the font carries no kerning for the pair.
+//
+// The result is rounded to a whole pixel. A text layer that sets type at (or
+// near) the font's own em — where one pixel spans a large design quantum and a
+// single-pixel kern would quantise away most of the sub-pixel pair adjustment —
+// should measure with KernUnits (or KernIndexUnits) instead, which return the
+// unrounded font-unit value, exactly as AdvanceIndexUnits complements
+// AdvanceIndex.
 func (fc *Face) Kern(prev, r rune) int {
+	return roundInt(fc.KernUnits(prev, r) * fc.scale)
+}
+
+// KernIndexUnits returns the horizontal kerning adjustment between the
+// consecutive glyphs left and right in font units (unrounded) — the value Kern
+// scales and rounds to pixels. GPOS pair positioning is preferred; the legacy
+// kern table is the fallback. It is the by-glyph-index, font-unit counterpart of
+// Kern, the exact primitive a shaper or a text engine wants: kerning applies
+// between shaped glyphs (which may be ligatures), and a caller typesetting at
+// the design em keeps the sub-pixel adjustment that Kern's whole-pixel rounding
+// would discard. A caller multiplies the result by Face.Scale to obtain pixels
+// (mirroring AdvanceIndexUnits). The adjustment is zero when the font carries no
+// kerning for the pair.
+func (fc *Face) KernIndexUnits(left, right GlyphIndex) float64 {
+	kn := Kerner{gpos: fc.font.gpos, kern: fc.font.kern}
+	return float64(kn.Kerning(left, right))
+}
+
+// KernUnits returns the horizontal kerning adjustment between the consecutive
+// runes prev and r in font units (unrounded) — the rune-keyed, font-unit
+// counterpart of Kern. Each rune maps through the cmap; the result is zero when
+// either rune is unmapped or the font carries no kerning for the pair. A caller
+// multiplies by Face.Scale to obtain pixels; see KernIndexUnits for the
+// by-glyph-index form a shaper drives on an already-substituted run.
+func (fc *Face) KernUnits(prev, r rune) float64 {
 	lg, ok := fc.font.GlyphIndex(prev)
 	if !ok {
 		return 0
@@ -107,8 +139,7 @@ func (fc *Face) Kern(prev, r rune) int {
 	if !ok {
 		return 0
 	}
-	kn := Kerner{gpos: fc.font.gpos, kern: fc.font.kern}
-	return roundInt(float64(kn.Kerning(lg, rg)) * fc.scale)
+	return fc.KernIndexUnits(lg, rg)
 }
 
 // MeasureKerned returns the total advance width of s in pixels like Measure,
