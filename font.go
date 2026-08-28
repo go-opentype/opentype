@@ -34,6 +34,7 @@ type Font struct {
 	loca             []uint32
 	glyf             []byte
 	cmap             cmapLookup
+	cmaps            []cmapSubtable        // every decoded cmap subtable, with the platform and encoding it was written for
 	cmapVS           *cmap14               // format-14 Unicode Variation Sequences subtable, if present
 	cff              *cffTable             // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
 	t1               *type1Font            // PostScript Type 1 outlines, for a program read by ParseType1

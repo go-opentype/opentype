@@ -8,8 +8,56 @@ import "fmt"
 
 // cmapLookup maps a rune to a glyph index. ok is false when the rune is not
 // mapped by the selected subtable (including a mapping to the .notdef glyph).
+//
+// reverse answers the other question: which code reaches a given glyph. A
+// subtable is a many-to-one map — a space and a no-break space commonly share
+// one glyph — so the inverse keeps the lowest code that reaches each glyph,
+// and is built once for the whole subtable rather than searched per glyph.
+//
+// budget bounds how many codes the walk may visit. Most formats describe no
+// more codes than their own bytes can hold and ignore it; formats 4, 8 and 12
+// do not — one group of a format-12 subtable can claim the whole Unicode
+// space, and a damaged one can claim more — so those three spend it.
 type cmapLookup interface {
 	lookup(r rune) (GlyphIndex, bool)
+	reverse(budget int) map[GlyphIndex]rune
+}
+
+// maxReverseCodes is the budget Font.RuneOfGlyphInMap gives a walk. A subtable
+// that describes more than a million codes is describing far more than any
+// inverse of it will be asked about, and the bound keeps a malformed font from
+// costing more than a well-formed one.
+const maxReverseCodes = 1 << 20
+
+// reverseRange records the codes [first, first+count) as reaching the glyphs
+// starting at gid, one glyph per code, into inv. It keeps the lowest code for
+// each glyph and reports how many codes it consumed of the budget left.
+func reverseRange(inv map[GlyphIndex]rune, first, count, gid uint32, budget int) int {
+	if uint32(budget) < count {
+		count = uint32(budget)
+	}
+	for i := uint32(0); i < count; i++ {
+		g := GlyphIndex(gid + i)
+		if g == 0 {
+			continue
+		}
+		if _, seen := inv[g]; !seen {
+			inv[g] = rune(first + i)
+		}
+	}
+	return int(count)
+}
+
+// cmapSubtable is one decoded cmap subtable together with the platform and
+// encoding it was written for. Which of them to address a font through is the
+// caller's decision and cannot be made here: a font embedded in a PDF is
+// addressed the way the document says, and only the document knows.
+type cmapSubtable struct {
+	platform uint16
+	encoding uint16
+	format   uint16
+	lookup   cmapLookup
+	inverse  map[GlyphIndex]rune // built on first use by Font.RuneOfGlyphInMap
 }
 
 // parseCmap selects and decodes a Unicode cmap subtable. It understands
@@ -30,7 +78,8 @@ func (f *Font) parseCmap(b []byte) error {
 	var best cmapLookup
 	bestScore := 0
 	for i := 0; i < numTables; i++ {
-		r.skip(4) // platformID, encodingID
+		platform := r.u16()
+		encoding := r.u16()
 		offset := int(r.u32())
 		if r.err != nil {
 			return fmt.Errorf("opentype: cmap record: %w", r.err)
@@ -83,6 +132,12 @@ func (f *Font) parseCmap(b []byte) error {
 		if err != nil {
 			return err
 		}
+		f.cmaps = append(f.cmaps, cmapSubtable{
+			platform: platform,
+			encoding: encoding,
+			format:   format,
+			lookup:   lk,
+		})
 		if score > bestScore {
 			best = lk
 			bestScore = score
@@ -179,6 +234,31 @@ func (c *cmap4) lookup(r rune) (GlyphIndex, bool) {
 	return 0, false
 }
 
+// reverse walks the segments in code order, resolving each code the same way
+// lookup does, and keeps the lowest code that reaches each glyph.
+func (c *cmap4) reverse(budget int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for i := 0; i < c.segCount; i++ {
+		if c.startCode[i] > c.endCode[i] {
+			continue
+		}
+		for cc := uint32(c.startCode[i]); cc <= uint32(c.endCode[i]); cc++ {
+			if budget == 0 {
+				return inv
+			}
+			budget--
+			g, ok := c.lookup(rune(cc))
+			if !ok {
+				continue
+			}
+			if _, seen := inv[g]; !seen {
+				inv[g] = rune(cc)
+			}
+		}
+	}
+	return inv
+}
+
 // cmap12group is one sequential-map group of a format-12 subtable.
 type cmap12group struct {
 	start    uint32
@@ -228,6 +308,22 @@ func (c *cmap12) lookup(r rune) (GlyphIndex, bool) {
 		}
 	}
 	return 0, false
+}
+
+// reverse expands each group: a group advances one glyph per code point, so
+// the codes it covers reach a contiguous run of glyphs.
+func (c *cmap12) reverse(budget int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for _, g := range c.groups {
+		if g.end < g.start {
+			continue
+		}
+		budget -= reverseRange(inv, g.start, g.end-g.start+1, g.startGID, budget)
+		if budget == 0 {
+			break
+		}
+	}
+	return inv
 }
 
 // cmap13group is one constant-map group of a format-13 subtable: every code
@@ -287,6 +383,25 @@ func (c *cmap13) lookup(r rune) (GlyphIndex, bool) {
 		}
 	}
 	return 0, false
+}
+
+// reverse keeps one code per group: every code point a format-13 group covers
+// reaches the same glyph, so only the lowest of them is worth recording, and a
+// group covering a whole Unicode block costs one entry rather than a million.
+// The budget goes unspent: a group costs one entry however many codes it
+// covers, so the walk is only as long as the subtable itself.
+func (c *cmap13) reverse(int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for _, g := range c.groups {
+		if g.end < g.start || g.glyphID == 0 {
+			continue
+		}
+		gid := GlyphIndex(g.glyphID)
+		if _, seen := inv[gid]; !seen {
+			inv[gid] = rune(g.start)
+		}
+	}
+	return inv
 }
 
 // cmap8Group is one sequential-map group of a format-8 subtable; identical in
@@ -358,6 +473,22 @@ func (c *cmap8) lookup(r rune) (GlyphIndex, bool) {
 	return 0, false
 }
 
+// reverse expands each group, exactly as format 12's does: the two formats
+// describe their groups the same way.
+func (c *cmap8) reverse(budget int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for _, g := range c.groups {
+		if g.end < g.start {
+			continue
+		}
+		budget -= reverseRange(inv, g.start, g.end-g.start+1, g.startGID, budget)
+		if budget == 0 {
+			break
+		}
+	}
+	return inv
+}
+
 // cmap0 is a decoded format-0 (byte encoding table) subtable: a flat 256-byte
 // glyph-id array covering U+0000-U+00FF.
 type cmap0 struct {
@@ -390,6 +521,21 @@ func (c *cmap0) lookup(r rune) (GlyphIndex, bool) {
 		return 0, false
 	}
 	return GlyphIndex(g), true
+}
+
+// reverse walks the 256-entry array, keeping the lowest code per glyph.
+// The budget goes unspent: the array is 256 entries.
+func (c *cmap0) reverse(int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for code, g := range c.glyphIDArray {
+		if g == 0 {
+			continue
+		}
+		if _, seen := inv[GlyphIndex(g)]; !seen {
+			inv[GlyphIndex(g)] = rune(code)
+		}
+	}
+	return inv
 }
 
 // cmap6 is a decoded format-6 (trimmed table mapping) subtable: a
@@ -436,6 +582,21 @@ func (c *cmap6) lookup(r rune) (GlyphIndex, bool) {
 	return GlyphIndex(g), true
 }
 
+// reverse walks the trimmed array, keeping the lowest code per glyph.
+// The budget goes unspent: the array is no longer than the subtable said.
+func (c *cmap6) reverse(int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for i, g := range c.glyphIDArray {
+		if g == 0 {
+			continue
+		}
+		if _, seen := inv[GlyphIndex(g)]; !seen {
+			inv[GlyphIndex(g)] = rune(uint32(c.firstCode) + uint32(i))
+		}
+	}
+	return inv
+}
+
 // cmap10 is a decoded format-10 (trimmed array) subtable: the 32-bit
 // analogue of format 6 — a contiguous, zero-based glyph-id array starting at
 // startCharCode, wide enough to cover astral code points.
@@ -480,6 +641,21 @@ func (c *cmap10) lookup(r rune) (GlyphIndex, bool) {
 		return 0, false
 	}
 	return GlyphIndex(g), true
+}
+
+// reverse walks the trimmed array, keeping the lowest code per glyph.
+// The budget goes unspent: the array is no longer than the subtable said.
+func (c *cmap10) reverse(int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for i, g := range c.glyphIDArray {
+		if g == 0 {
+			continue
+		}
+		if _, seen := inv[GlyphIndex(g)]; !seen {
+			inv[GlyphIndex(g)] = rune(c.startCharCode + uint32(i))
+		}
+	}
+	return inv
 }
 
 // cmap2SubHeader is one decoded subHeader record of a format-2 subtable.
@@ -583,6 +759,25 @@ func (c *cmap2) lookup(r rune) (GlyphIndex, bool) {
 		return 0, false
 	}
 	return GlyphIndex(uint16(int32(g) + int32(sh.idDelta))), true
+}
+
+// reverse walks every code the high-byte dispatch can reach, resolving each
+// the same way lookup does. A single-byte code has an implicit high byte of
+// zero, so the walk covers the whole 16-bit space rather than only the codes
+// some subHeader claims.
+// The budget goes unspent: the walk is the 16-bit code space, once.
+func (c *cmap2) reverse(int) map[GlyphIndex]rune {
+	inv := make(map[GlyphIndex]rune)
+	for cc := uint32(0); cc <= 0xFFFF; cc++ {
+		g, ok := c.lookup(rune(cc))
+		if !ok {
+			continue
+		}
+		if _, seen := inv[g]; !seen {
+			inv[g] = rune(cc)
+		}
+	}
+	return inv
 }
 
 // cmap14DefaultRange is one entry of a format-14 default-UVS table: base

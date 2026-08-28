@@ -365,6 +365,25 @@ func cmap12FromMap(m map[rune]uint16) []byte {
 	return w.bytes()
 }
 
+// cmap12Bytes builds a format-12 (segmented coverage) subtable from explicit
+// {startCharCode, endCharCode, startGlyphID} groups, which cmap12FromMap
+// cannot express: it derives its groups from a map and so can never write one
+// that runs backwards or lands on .notdef.
+func cmap12Bytes(groups [][3]uint32) []byte {
+	w := &bw{}
+	w.u16(12) // format
+	w.u16(0)  // reserved
+	w.u32(0)  // length (unused by parser)
+	w.u32(0)  // language
+	w.u32(uint32(len(groups)))
+	for _, g := range groups {
+		w.u32(g[0]) // startCharCode
+		w.u32(g[1]) // endCharCode
+		w.u32(g[2]) // startGlyphID
+	}
+	return w.bytes()
+}
+
 // cmap13Bytes builds a format-13 (many-to-one) subtable from explicit
 // {startCharCode, endCharCode, glyphID} groups. Every code point in each
 // [start, end] range maps to the single constant glyphID (this is what
