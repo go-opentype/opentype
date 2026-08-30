@@ -989,21 +989,36 @@ func (m *t2machine) rrcurveto(s []float64) {
 }
 
 // rcurveline draws cubic curves then a final straight line (trailing pair).
+//
+// The loop stops before the trailing pair, and the tail is then read directly
+// — so it has to be checked. A well-formed rcurveline carries 6n+2 operands
+// and cannot fail it; a charstring that reaches the operator with an empty
+// stack is malformed, and a subset font in the wild does exactly that. The
+// operators that take a fixed number of operands say what they wanted and
+// stop, so this does the same rather than drawing from operands that are not
+// there.
 func (m *t2machine) rcurveline(s []float64) {
 	j := 0
 	for ; j+6 <= len(s)-2; j += 6 {
 		m.relCurve(s[j], s[j+1], s[j+2], s[j+3], s[j+4], s[j+5])
 	}
-	m.lineTo(s[j], s[j+1])
+	if j+2 <= len(s) {
+		m.lineTo(s[j], s[j+1])
+	}
 }
 
 // rlinecurve draws straight lines then a final cubic curve (trailing six).
+// The trailing six are read directly for the same reason, and checked for the
+// same one: fewer than six operands left is a malformed charstring, not six
+// operands to read past the end of the stack.
 func (m *t2machine) rlinecurve(s []float64) {
 	j := 0
 	for ; j+2 <= len(s)-6; j += 2 {
 		m.lineTo(s[j], s[j+1])
 	}
-	m.relCurve(s[j], s[j+1], s[j+2], s[j+3], s[j+4], s[j+5])
+	if j+6 <= len(s) {
+		m.relCurve(s[j], s[j+1], s[j+2], s[j+3], s[j+4], s[j+5])
+	}
 }
 
 // relCurve draws one cubic from six relative deltas (two control points then
