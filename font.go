@@ -152,9 +152,15 @@ func Parse(b []byte) (*Font, error) {
 	for i := 0; i < numTables; i++ {
 		rec := b[12+i*16:]
 		tag := string(rec[0:4])
-		off := int(be32(rec[8:]))
-		length := int(be32(rec[12:]))
-		if off+length > len(b) {
+		// int64, not int. These are two uint32s out of somebody's file, and
+		// int is 32 bits on a 32-bit build: a length of 0xFFFFFFFF converts to
+		// MINUS ONE there, so off+length comes out SMALLER than off and the
+		// check below passes a table that is not in the file at all. What
+		// followed was b[184:183] -- a panic, in a reader whose whole job is to
+		// refuse a malformed font rather than crash on one.
+		off := int64(be32(rec[8:]))
+		length := int64(be32(rec[12:]))
+		if off+length > int64(len(b)) {
 			return nil, fmt.Errorf("opentype: table %q out of range", tag)
 		}
 		tables[tag] = b[off : off+length]
