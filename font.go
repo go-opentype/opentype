@@ -140,6 +140,19 @@ func Parse(b []byte) (*Font, error) {
 	case versionTrueType, versionTrue, versionOTTO:
 		// supported: TrueType ('glyf') and CFF/OpenType ("OTTO") outlines.
 	default:
+		// A WOFF or WOFF2 container holds an sfnt; unwrap it and parse that,
+		// so every caller reads a web font with no change of its own. This is
+		// the form a font service serves — see woff2.go.
+		if isWOFFContainer(b) {
+			sfnt, err := decodeWOFFContainer(b)
+			if err != nil {
+				return nil, err
+			}
+			if isWOFFContainer(sfnt) {
+				return nil, fmt.Errorf("opentype: a WOFF container yielded another one")
+			}
+			return Parse(sfnt)
+		}
 		return nil, fmt.Errorf("opentype: bad sfnt version 0x%08x", version)
 	}
 
