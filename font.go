@@ -233,10 +233,10 @@ func Parse(b []byte) (*Font, error) {
 		}
 		f.cff = cff
 	default:
+		f.glyf = tables["glyf"]
 		if err := f.parseLoca(tables["loca"]); err != nil {
 			return nil, err
 		}
-		f.glyf = tables["glyf"]
 	}
 	if cm, ok := tables["cmap"]; ok {
 		if err := f.parseCmap(cm); err != nil {
