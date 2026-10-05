@@ -125,6 +125,9 @@ const (
 // Parse decodes a TrueType/OpenType font from b and returns a Font. The byte
 // slice is retained (not copied) and must not be mutated by the caller.
 //
+// Missing trailing hmtx side bearings in PDF subsets are recovered from
+// TrueType glyph bounds when available, or replaced with zero.
+//
 // It fails on a corrupt or unsupported container: a bad sfnt magic, truncated
 // data, or a missing required table — which does not include the character
 // map: see [Font.HasCharacterMap]. All three outline flavours are supported:
@@ -216,9 +219,6 @@ func Parse(b []byte) (*Font, error) {
 	if err := f.parseHhea(tables["hhea"]); err != nil {
 		return nil, err
 	}
-	if err := f.parseHmtx(tables["hmtx"]); err != nil {
-		return nil, err
-	}
 	switch {
 	case hasCFF2:
 		c2, err := parseCFF2(tables["CFF2"])
@@ -237,6 +237,10 @@ func Parse(b []byte) (*Font, error) {
 			return nil, err
 		}
 		f.glyf = tables["glyf"]
+	}
+	// Missing trailing hmtx bearings can be recovered from TrueType glyph headers.
+	if err := f.parseHmtx(tables["hmtx"]); err != nil {
+		return nil, err
 	}
 	if cm, ok := tables["cmap"]; ok {
 		if err := f.parseCmap(cm); err != nil {
