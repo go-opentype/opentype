@@ -154,3 +154,80 @@ func TestParseLocaUnrecoverableTail(t *testing.T) {
 		}
 	}
 }
+
+func TestParseVmtxMissingBearings(t *testing.T) {
+	cases := []struct {
+		name string
+		size int
+		tail [2]int
+	}{
+		{"complete", 40, [2]int{-95, 105}},
+		{"no trailing bearings", 36, [2]int{0, 0}},
+		{"one trailing byte", 37, [2]int{0, 0}},
+		{"one trailing bearing", 38, [2]int{-95, 0}},
+		{"partial second bearing", 39, [2]int{-95, 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tables := vertTables()
+			tsbs := append([]int(nil), vertTsb...)
+			tsbs[9] = -95
+			tables["vmtx"] = vmtxTable(vertAdv, tsbs, 9)
+			complete := mustParse(t, assemble(versionTrueType, tables))
+			tables["vmtx"] = tables["vmtx"][:tc.size]
+			f := mustParse(t, assemble(versionTrueType, tables))
+			tsbs[9], tsbs[10] = tc.tail[0], tc.tail[1]
+			if !f.HasVerticalMetrics() || !reflect.DeepEqual(f.tsbs, tsbs) {
+				t.Fatalf("vertical=%v, tsbs=%v, want true,%v", f.HasVerticalMetrics(), f.tsbs, tsbs)
+			}
+			if !reflect.DeepEqual(f.vertAdvances, complete.vertAdvances) || !reflect.DeepEqual(f.advances, complete.advances) {
+				t.Fatal("horizontal or vertical advances changed")
+			}
+			if raw, _ := f.Table("vmtx"); !reflect.DeepEqual(raw, tables["vmtx"]) {
+				t.Error("the raw vmtx table must retain the original bytes")
+			}
+			face, reference := f.NewFace(100), complete.NewFace(100)
+			if face.VerticalAdvance('R') != 92 || face.VerticalAdvance(' ') != 92 {
+				t.Fatal("trailing glyphs must retain the last vertical advance")
+			}
+			if origin, ok := face.VerticalOrigin('R'); !ok || origin != 88 {
+				t.Fatalf("VORG origin = %d,%v, want 88,true", origin, ok)
+			}
+			for _, r := range []rune{'A', 'E', 'R', ' '} {
+				gotBounds, gotMask, _, gotAdvance, gotOK := face.GlyphMask(r, 0, 0)
+				wantBounds, wantMask, _, wantAdvance, wantOK := reference.GlyphMask(r, 0, 0)
+				if gotOK != wantOK || gotBounds != wantBounds || gotAdvance != wantAdvance || !reflect.DeepEqual(gotMask, wantMask) {
+					t.Fatalf("horizontal rendering of %q changed", r)
+				}
+			}
+		})
+	}
+}
+
+func TestParseVmtxTruncatedPairs(t *testing.T) {
+	for size := 0; size < 36; size++ {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			tables := vertTables()
+			tables["vmtx"] = tables["vmtx"][:size]
+			if _, err := Parse(assemble(versionTrueType, tables)); !errors.Is(err, errTruncated) {
+				t.Fatalf("Parse with %d vmtx bytes = %v, want errTruncated", size, err)
+			}
+		})
+	}
+}
+
+func TestParseVmtxMissingBearingsCFF(t *testing.T) {
+	tables := cffTables([][]byte{(&csb{}).op(14).b, cffSquare()}, map[rune]uint16{'A': 1})
+	tables["vhea"] = vheaTable(800, -200, 0, 1)
+	tables["vmtx"] = vmtxTable([]int{850, 850}, []int{-3, 25}, 1)[:4]
+	f := mustParse(t, assemble(versionOTTO, tables))
+	if !f.HasVerticalMetrics() || !reflect.DeepEqual(f.tsbs, []int{-3, 0}) {
+		t.Fatalf("vertical=%v, tsbs=%v, want true,[-3 0]", f.HasVerticalMetrics(), f.tsbs)
+	}
+	if f.NewFace(100).VerticalAdvance('A') != 85 {
+		t.Fatal("CFF glyph must retain the shared vertical advance")
+	}
+	if _, mask, _, _, ok := f.NewFace(20).GlyphMask('A', 0, 0); !ok || mask == nil {
+		t.Fatal("CFF glyph must remain renderable")
+	}
+}
