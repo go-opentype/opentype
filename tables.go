@@ -100,23 +100,39 @@ func (f *Font) parseHmtx(b []byte) error {
 // parseLoca decodes the loca table into numGlyphs+1 glyph offsets into glyf.
 // Short format stores uint16 half-offsets (doubled); long format stores
 // uint32 offsets directly, selected by head.indexToLocFormat.
+// A truncated, entry-aligned table can omit only empty trailing glyphs when
+// its existing offsets are monotonic and the last offset is the end of glyf.
 func (f *Font) parseLoca(b []byte) error {
 	count := f.numGlyphs + 1
+	size, format := 2, "short"
+	if f.indexToLocFormat != 0 {
+		size, format = 4, "long"
+	}
+	entries := min(count, len(b)/size)
+	if entries < count && (entries == 0 || len(b)%size != 0) {
+		return fmt.Errorf("opentype: loca table (%s): %w", format, errTruncated)
+	}
 	f.loca = make([]uint32, count)
-	if f.indexToLocFormat == 0 {
-		if len(b) < count*2 {
-			return fmt.Errorf("opentype: loca table (short): %w", errTruncated)
-		}
-		for i := 0; i < count; i++ {
+	for i := 0; i < entries; i++ {
+		if size == 2 {
 			f.loca[i] = uint32(be16(b[i*2:])) * 2
+		} else {
+			f.loca[i] = be32(b[i*4:])
 		}
-		return nil
 	}
-	if len(b) < count*4 {
-		return fmt.Errorf("opentype: loca table (long): %w", errTruncated)
-	}
-	for i := 0; i < count; i++ {
-		f.loca[i] = be32(b[i*4:])
+	if entries < count {
+		last := f.loca[entries-1]
+		if uint64(last) != uint64(len(f.glyf)) {
+			return fmt.Errorf("opentype: loca table (%s): %w", format, errTruncated)
+		}
+		for i := 1; i < entries; i++ {
+			if f.loca[i] < f.loca[i-1] {
+				return fmt.Errorf("opentype: loca table (%s): %w", format, errTruncated)
+			}
+		}
+		for i := entries; i < count; i++ {
+			f.loca[i] = last
+		}
 	}
 	return nil
 }
