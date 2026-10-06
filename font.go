@@ -39,6 +39,7 @@ type Font struct {
 	cff              *cffTable             // CFF/Type2 outlines for an OpenType ("OTTO") font, if present
 	t1               *type1Font            // PostScript Type 1 outlines, for a program read by ParseType1
 	glyphNames       map[string]GlyphIndex // what the font calls its glyphs, when it names them
+	postNames        []string              // TrueType glyph names from the optional post table
 	cff2             *cff2Table            // CFF2 (variable Compact Font Format) outlines, if present
 	fvar             *fvarTable            // optional: variation axes and named instances
 	avar             *avarTable            // optional: axis-value segment maps
@@ -279,6 +280,9 @@ func Parse(b []byte) (*Font, error) {
 	// Optional descriptor tables (OS/2, post): the metadata a PDF FontDescriptor
 	// and general styling consume. Absence is not an error (see descriptor.go).
 	f.parseDescriptor(tables)
+	if !isCFF {
+		f.parsePostNames(tables["post"])
+	}
 	return f, nil
 }
 
