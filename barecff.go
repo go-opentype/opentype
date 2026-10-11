@@ -163,12 +163,16 @@ func (f *Font) buildNames() {
 	}
 }
 
-// GlyphName is what the font calls a glyph. ok is false for a font that does
-// not name its glyphs — a TrueType font usually does not, and a CFF font
-// addressed by character identifier never does.
+// GlyphName is what the font calls a glyph, from a TrueType post table or a
+// CFF/Type 1 program. ok is false for an out-of-range glyph or a font that does
+// not name its glyphs, including TrueType post version 3 and CID-keyed CFF.
 func (f *Font) GlyphName(gid GlyphIndex) (string, bool) {
 	if f.t1 != nil {
 		return f.t1.glyphName(int(gid))
+	}
+	if int(gid) < len(f.postNames) {
+		name := f.postNames[gid]
+		return name, name != ""
 	}
 	if f.cff == nil || f.cff.isCID {
 		return "", false
