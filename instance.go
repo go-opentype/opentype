@@ -22,7 +22,10 @@ import (
 // (cvt/fpgm/prep) are dropped, since flattening composites into simple glyphs
 // renumbers the points the instructions address; the instance renders unhinted.
 // Global metric variations (MVAR) are not folded into hhea/OS-2; the instance
-// keeps the default master's global metrics.
+// keeps the default master's global metrics. The style fields (OS/2
+// usWeightClass and fsSelection, head macStyle) are restamped from the wght,
+// ital and slnt coordinates; see stampInstanceStyle. Name strings still describe
+// the default master.
 
 // glyfWriter is a minimal big-endian byte writer for re-encoding glyf/loca and
 // patching the cloned metric tables.
@@ -119,7 +122,85 @@ func (f *Font) InstanceBytes(coords map[string]float64) ([]byte, error) {
 		}
 		tables[tag] = append([]byte(nil), b...)
 	}
+	f.stampInstanceStyle(tables, coords)
 	return buildSFNT(versionTrueType, tables), nil
+}
+
+// Offsets of the style fields an instance restamps: OS/2 usWeightClass and
+// fsSelection, and head macStyle (OpenType OS/2 and head table chapters).
+const (
+	os2WeightClassOff = 4
+	os2FsSelectionOff = 62
+	headMacStyleOff   = 44
+
+	fsItalic  = 1 << 0 // fsSelection bit 0; must match macStyle bit 1
+	fsBold    = 1 << 5 // fsSelection bit 5; must match macStyle bit 0
+	fsRegular = 1 << 6 // fsSelection bit 6; if set, bits 0 and 5 must be clear
+
+	macBold   = 1 << 0
+	macItalic = 1 << 1
+)
+
+// stampInstanceStyle makes the style fields of a baked instance say what the
+// instance is, instead of what the variable font's default master was. The
+// OS/2 chapter notes that usWeightClass and the style bits are not adjusted by
+// variation data and "can be derived from 'wght' ... user coordinates", so the
+// instancer is the only place that can.
+//
+// It acts only when coords selects a style axis: wght sets usWeightClass
+// (rounded, clamped to 1..1000) and the bold bit (weight >= 700); ital (>= 0.5)
+// or slnt (< 0) set the italic bit, replacing the default master's. Then
+// fsSelection bits 0, 5 and 6 and macStyle bits 0 and 1 are rewritten
+// together, so the two tables keep agreeing, with REGULAR set only for a
+// non-bold, non-italic 400. Other bits are left alone. A table that is absent
+// or too short is skipped. Name strings are not rewritten.
+func (f *Font) stampInstanceStyle(tables map[string][]byte, coords map[string]float64) {
+	wght, hasW := coords["wght"]
+	ital, hasI := coords["ital"]
+	slnt, hasS := coords["slnt"]
+	if !hasW && !hasI && !hasS {
+		return
+	}
+	os2, head := tables["OS/2"], tables["head"]
+	italic := f.fsSelection&fsItalic != 0 || f.macStyle&macItalic != 0
+	switch {
+	case hasI:
+		italic = ital >= 0.5
+	case hasS:
+		italic = slnt < 0
+	}
+	weight := f.weightClass
+	if hasW {
+		weight = min(max(roundInt(wght), 1), 1000)
+	}
+	bold := weight >= 700
+	sel := uint16(0)
+	if italic {
+		sel |= fsItalic
+	}
+	if bold {
+		sel |= fsBold
+	}
+	if !italic && !bold && weight == 400 {
+		sel |= fsRegular
+	}
+	if len(os2) >= os2FsSelectionOff+2 {
+		if hasW {
+			binary.BigEndian.PutUint16(os2[os2WeightClassOff:], uint16(weight))
+		}
+		old := binary.BigEndian.Uint16(os2[os2FsSelectionOff:])
+		binary.BigEndian.PutUint16(os2[os2FsSelectionOff:], old&^(fsItalic|fsBold|fsRegular)|sel)
+	}
+	if len(head) >= headMacStyleOff+2 {
+		mac := binary.BigEndian.Uint16(head[headMacStyleOff:]) &^ (macBold | macItalic)
+		if bold {
+			mac |= macBold
+		}
+		if italic {
+			mac |= macItalic
+		}
+		binary.BigEndian.PutUint16(head[headMacStyleOff:], mac)
+	}
 }
 
 // packGlyf concatenates the per-glyph blobs into a glyf table and its matching

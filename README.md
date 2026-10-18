@@ -98,7 +98,9 @@ swapping this in for the x/image face is mechanical.
 - **Subsetting & instancing** — `SubsetTrueType`/`SubsetCFF` cut a font down
   to a glyph set (closing composite/`seac` dependencies and remapping ids),
   and `Instance`/`InstanceBytes` bake a variable font to a static instance —
-  the writer side needed to embed fonts in PDFs
+  the writer side needed to embed fonts in PDFs; the instance's OS/2
+  `usWeightClass`/`fsSelection` and head `macStyle` follow the `wght`/`ital`/
+  `slnt` coordinates it was baked at
 - **Anti-aliased rasterisation** via 4×4 supersampling under the non-zero
   winding rule
 
