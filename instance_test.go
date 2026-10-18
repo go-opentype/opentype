@@ -166,3 +166,105 @@ func TestContourBoundsEmpty(t *testing.T) {
 		t.Error("empty contours should report ok=false")
 	}
 }
+
+// styleOf bakes f at coords and returns what the instance says about itself:
+// OS/2 usWeightClass, OS/2 fsSelection and head macStyle.
+func styleOf(t *testing.T, f *Font, coords map[string]float64) (weight int, sel, mac uint16) {
+	t.Helper()
+	b, err := f.InstanceBytes(coords)
+	if err != nil {
+		t.Fatalf("InstanceBytes(%v): %v", coords, err)
+	}
+	inst, err := Parse(b)
+	if err != nil {
+		t.Fatalf("Parse(instance): %v", err)
+	}
+	return inst.WeightClass(), inst.fsSelection, inst.macStyle
+}
+
+// TestInstanceStampsStyle: an instance reports the weight and slope it was baked
+// at, with fsSelection (ITALIC bit 0, BOLD bit 5, REGULAR bit 6) and macStyle
+// (bold bit 0, italic bit 1) agreeing, per the OpenType OS/2 and head chapters.
+func TestInstanceStampsStyle(t *testing.T) {
+	f := instanceVarFont(t)
+	os2 := make([]byte, 78)
+	binary.BigEndian.PutUint16(os2[0:], 4)
+	binary.BigEndian.PutUint16(os2[4:], 400)
+	binary.BigEndian.PutUint16(os2[62:], fsRegular|1<<7) // REGULAR + USE_TYPO_METRICS
+	f.tables["OS/2"] = os2
+
+	for _, c := range []struct {
+		name   string
+		coords map[string]float64
+		weight int
+		sel    uint16
+		mac    uint16
+	}{
+		{"regular", map[string]float64{"wght": 400}, 400, fsRegular | 1<<7, 0},
+		{"bold", map[string]float64{"wght": 700}, 700, fsBold | 1<<7, macBold},
+		{"black", map[string]float64{"wght": 900}, 900, fsBold | 1<<7, macBold},
+		{"light", map[string]float64{"wght": 300}, 300, 1 << 7, 0},
+		{"clamped high", map[string]float64{"wght": 5000}, 1000, fsBold | 1<<7, macBold},
+		{"clamped low", map[string]float64{"wght": -3}, 1, 1 << 7, 0},
+		{"ital axis", map[string]float64{"wght": 400, "ital": 1}, 400, fsItalic | 1<<7, macItalic},
+		{"bold ital axis", map[string]float64{"wght": 700, "ital": 1}, 700, fsItalic | fsBold | 1<<7, macItalic | macBold},
+		{"ital axis off", map[string]float64{"wght": 400, "ital": 0}, 400, fsRegular | 1<<7, 0},
+		{"slnt axis", map[string]float64{"wght": 400, "slnt": -10}, 400, fsItalic | 1<<7, macItalic},
+		{"slnt zero", map[string]float64{"wght": 400, "slnt": 0}, 400, fsRegular | 1<<7, 0},
+		{"slope only keeps weight", map[string]float64{"ital": 1}, 400, fsItalic | 1<<7, macItalic},
+	} {
+		// instanceVarFont has only a wght axis; ital and slnt are accepted by
+		// stampInstanceStyle but rejected by InstanceBytes as unknown axes, so
+		// exercise those through the stamping step directly.
+		_, hasI := c.coords["ital"]
+		_, hasS := c.coords["slnt"]
+		if hasI || hasS {
+			tables := map[string][]byte{"OS/2": append([]byte(nil), os2...), "head": make([]byte, 54)}
+			f.stampInstanceStyle(tables, c.coords)
+			w := int(binary.BigEndian.Uint16(tables["OS/2"][4:]))
+			sel := binary.BigEndian.Uint16(tables["OS/2"][62:])
+			mac := binary.BigEndian.Uint16(tables["head"][44:])
+			if w != c.weight || sel != c.sel || mac != c.mac {
+				t.Errorf("%s: weight %d sel %#x mac %#x, want %d %#x %#x", c.name, w, sel, mac, c.weight, c.sel, c.mac)
+			}
+			continue
+		}
+		w, sel, mac := styleOf(t, f, c.coords)
+		if w != c.weight || sel != c.sel || mac != c.mac {
+			t.Errorf("%s: weight %d sel %#x mac %#x, want %d %#x %#x", c.name, w, sel, mac, c.weight, c.sel, c.mac)
+		}
+	}
+}
+
+// TestInstanceStyleSkipsShortTables: a font whose OS/2 is absent or truncated,
+// or whose head is truncated, is stamped without panicking and left alone.
+func TestInstanceStyleSkipsShortTables(t *testing.T) {
+	f := instanceVarFont(t)
+	tables := map[string][]byte{"OS/2": make([]byte, 10), "head": make([]byte, 10)}
+	f.stampInstanceStyle(tables, map[string]float64{"wght": 700})
+	if len(tables["OS/2"]) != 10 || tables["OS/2"][5] != 0 || tables["head"][9] != 0 {
+		t.Error("short tables were modified")
+	}
+	f.stampInstanceStyle(map[string][]byte{}, map[string]float64{"wght": 700})
+	// No style axis in coords: nothing is touched.
+	tables = map[string][]byte{"OS/2": make([]byte, 78), "head": make([]byte, 54)}
+	f.stampInstanceStyle(tables, nil)
+	if tables["OS/2"][62] != 0 || tables["head"][44] != 0 {
+		t.Error("tables modified without a style axis")
+	}
+}
+
+// TestInstanceStyleKeepsDefaultSlope: with only wght given, the italic bit comes
+// from the default master (an italic variable font stays italic).
+func TestInstanceStyleKeepsDefaultSlope(t *testing.T) {
+	f := instanceVarFont(t)
+	os2 := make([]byte, 78)
+	binary.BigEndian.PutUint16(os2[4:], 400)
+	binary.BigEndian.PutUint16(os2[62:], fsItalic)
+	f.tables["OS/2"] = os2
+	f.fsSelection = fsItalic
+	w, sel, mac := styleOf(t, f, map[string]float64{"wght": 700})
+	if w != 700 || sel != fsItalic|fsBold || mac != macItalic|macBold {
+		t.Errorf("weight %d sel %#x mac %#x, want 700 %#x %#x", w, sel, mac, fsItalic|fsBold, macItalic|macBold)
+	}
+}
