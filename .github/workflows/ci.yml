@@ -94,9 +94,50 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27.2"
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # ⛔ `qemu-user-static` is a VIRTUAL package on Ubuntu 26.04, which
+      # `ubuntu-latest` became on 2026-10-19, and apt refuses to choose between its
+      # two providers:
+      #
+      #   E: Package 'qemu-user-static' has no installation candidate
+      #
+      # ⚠ Installing a provider is NOT the fix: `qemu-user-binfmt` registers binfmt
+      # handlers, it does not ship the `qemu-<arch>-static` binaries this lane
+      # invokes. `qemu-user` ships the dynamic `qemu-<arch>`, which is all that
+      # `go test -exec` needs, so both are installed and BOTH NAMES are accepted
+      # below. go-tex/engine#645 has the full account.
+      - name: install qemu user-mode emulators
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y qemu-user qemu-user-binfmt
       - name: Test under qemu (${{ matrix.goarch }})
-        run: GOARCH=${{ matrix.goarch }} go test ${{ matrix.exec }} ./...
+        run: |
+          flag="${{ matrix.exec }}"
+          ex=""
+          if [ -n "$flag" ]; then
+            base="${flag#-exec=}"
+            q=""
+            for cand in "$base" "${base%-static}"; do
+              command -v "$cand" >/dev/null 2>&1 && q="$cand" && break
+            done
+            # ⛔ A missing emulator FAILS this lane. A lane that reports success
+            # for an architecture it never ran is the one outcome this matrix
+            # exists to rule out.
+            if [ -z "$q" ]; then
+              echo "::error::no qemu user emulator for ${{ matrix.goarch }} (looked for $base and ${base%-static})"
+              exit 1
+            fi
+            ex="-exec=$q"
+            # Printed on purpose: without it, "ran under emulation" and
+            # "skipped" are indistinguishable from a green tick.
+            echo "running ${{ matrix.goarch }} under $q"
+          else
+            # ⚠ An EMPTY exec is a lane that runs NATIVELY on purpose: a 386
+            # ELF executes directly on the x86-64 runner, and qemu-i386 was
+            # measured to lose the guest's floating-point state across the
+            # signal Go delivers for preemption. Failing it for having no
+            # emulator would break a lane that is correct as it stands.
+            echo "running ${{ matrix.goarch }} natively"
+          fi
+          GOARCH=${{ matrix.goarch }} go test $ex ./...
 
   # Cross-compiling for darwin and windows is not running there. poppler and
   # pdfium are tested on both, so this is not new ground -- it is ground the
