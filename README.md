@@ -70,6 +70,15 @@ swapping this in for the x/image face is mechanical.
 ## Features
 
 - **sfnt container** parsing (`0x00010000` TrueType and `OTTO` CFF magics)
+- **WOFF and WOFF2 web fonts** unwrapped by `Parse`. WOFF2 is inflated with
+  the decoder-only `github.com/dsnet/compress/brotli`, not
+  `github.com/andybalholm/brotli`, whose root package imports `net/http`. Its
+  `init`, and crypto/tls's behind it, used to be linked into every importer:
+  1.8 MB of a 7.5 MB `GOOS=js` program that only draws text. Inflation is
+  bounded by the size the WOFF2 directory declares, at most 256 MiB, so a
+  decompression bomb is refused. The trade-off is speed: dsnet inflates about
+  1.37× slower (≈0.4 ms more per 200 KB font, measured on one core at load
+  7–10). That is an open item.
 - **TrueType `glyf` outlines** — simple and composite glyphs, implied
   on-curve midpoint synthesis, cycle/depth-guarded composites
 - **CFF and CFF2 outlines** — Type 2 charstrings, subroutines, `seac`
