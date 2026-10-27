@@ -12,7 +12,13 @@ import (
 	"io"
 	"sort"
 
-	"github.com/andybalholm/brotli"
+	// A decoder-only Brotli (RFC 7932). github.com/andybalholm/brotli's root
+	// package also carries HTTP helpers and imports net/http, whose init — and
+	// crypto/tls's behind it — the linker keeps as roots in every program that
+	// imports this package: about 1.8 MB of WebAssembly in a program that only
+	// draws text. The tests still compress with andybalholm/brotli, so every
+	// WOFF2 test is also a cross-implementation check.
+	"github.com/dsnet/compress/brotli"
 )
 
 // WOFF2 is the container the web serves fonts in: an SFNT whose tables are
@@ -43,6 +49,11 @@ const (
 	// flagOverlapSimpleBitmap says a per-glyph bitmap follows the substreams,
 	// marking the glyphs whose first point takes OVERLAP_SIMPLE.
 	flagOverlapSimpleBitmap = 1
+	// maxWOFF2Stream bounds the inflated table data a WOFF2 may declare. The
+	// largest fonts in common use (CJK families) stay well under 64 MiB; the
+	// bound keeps a hostile directory from sizing an allocation, and fits an
+	// int on 32-bit targets.
+	maxWOFF2Stream = 256 << 20
 )
 
 // woff2KnownTags is the table the 6-bit tag index in a directory entry indexes
@@ -133,9 +144,30 @@ func decodeWOFF2(b []byte) ([]byte, error) {
 	if uint64(r.i)+uint64(totalCompressed) > uint64(len(b)) {
 		return nil, fmt.Errorf("opentype: woff2: compressed stream past end: %w", errTruncated)
 	}
-	stream, err := io.ReadAll(brotli.NewReader(bytes.NewReader(b[r.i : r.i+int(totalCompressed)])))
+	// The stream must hold exactly the tables' data, so its length is known
+	// before inflating: read at most one byte more, and a stream that inflates
+	// past it (a decompression bomb, or a lying directory) is refused instead
+	// of being read to the end of memory.
+	var want uint64
+	for _, t := range tables {
+		if t.transformed() {
+			want += uint64(t.xformLen)
+		} else {
+			want += uint64(t.origLength)
+		}
+	}
+	if want > maxWOFF2Stream {
+		return nil, fmt.Errorf("opentype: woff2: tables total %d bytes, more than the %d accepted", want, maxWOFF2Stream)
+	}
+	// NewReader cannot fail: it only stores the source and resets its state
+	// (dsnet/compress brotli/reader.go); corruption surfaces from Read.
+	br, _ := brotli.NewReader(bytes.NewReader(b[r.i:r.i+int(totalCompressed)]), nil)
+	stream, err := io.ReadAll(io.LimitReader(br, int64(want)+1))
 	if err != nil {
 		return nil, fmt.Errorf("opentype: woff2: brotli: %w", err)
+	}
+	if uint64(len(stream)) > want {
+		return nil, fmt.Errorf("opentype: woff2: the brotli stream inflates past the %d bytes its tables declare", want)
 	}
 	// The stream is the tables' data concatenated in directory order, each at
 	// its transformed length where it has one.
