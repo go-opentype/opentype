@@ -28,6 +28,19 @@ func (f *Font) parseDescriptor(tables map[string][]byte) {
 		f.widthClass = int(be16(b[6:]))
 		f.sFamilyClass = int(sbe16(b[30:]))
 		f.fsSelection = be16(b[62:])
+		// The line-metric set, present from OS/2 version 0 and so covered by the
+		// len(b) >= 78 guard above: sTypoAscender at 68, sTypoDescender at 70,
+		// sTypoLineGap at 72, usWinAscent at 74, usWinDescent at 76.
+		//
+		// ⛔ THE TWO DESCENDERS HAVE OPPOSITE SIGNS. sTypoDescender is signed and
+		// negative below the baseline, as hhea's is; usWinDescent is UNSIGNED and
+		// positive below it. Decoding both with the same helper would make one of
+		// them nonsense — usually usWinDescent, read as a huge negative.
+		f.sTypoAscender = int(sbe16(b[68:]))
+		f.sTypoDescender = int(sbe16(b[70:]))
+		f.sTypoLineGap = int(sbe16(b[72:]))
+		f.usWinAscent = int(be16(b[74:]))
+		f.usWinDescent = int(be16(b[76:]))
 		// sxHeight and sCapHeight were added in OS/2 version 2; older tables (and
 		// truncated version-2 ones) simply do not carry them.
 		if f.os2Version >= 2 && len(b) >= 90 {
@@ -58,6 +71,60 @@ func (f *Font) Descent() int { return f.descender }
 // LineGap returns the typographic line gap in font units (hhea.lineGap): the
 // recommended extra spacing between lines beyond ascent minus descent.
 func (f *Font) LineGap() int { return f.lineGap }
+
+// TypoAscent, TypoDescent and TypoLineGap return OS/2's sTypoAscender,
+// sTypoDescender and sTypoLineGap in font units, and UseTypoMetrics reports the
+// font's own instruction to prefer them.
+//
+// ⭐ THESE, NOT Ascent/Descent/LineGap, ARE WHAT THE SPEC NAMES FOR NEW WORK.
+// OpenType 1.9.1, hhea:
+//
+//	The ascender, descender and linegap values in this table are Apple specific …
+//	The sTypoAscender, sTypoDescender and sTypoLineGap fields in the OS/2 table are
+//	used on the Windows platform, and are recommended for new text-layout
+//	implementations.
+//
+// and OS/2, sTypoAscender: "This field should be combined with the sTypoDescender
+// and sTypoLineGap values to determine default line spacing … intended to allow
+// applications to lay out documents in a typographically correct and portable
+// fashion."
+//
+// Ascent, Descent and LineGap keep returning hhea unchanged: they say which table
+// they read, and silently changing what an existing accessor means would reflow
+// every document laid out with this package.
+//
+// ⛔ TypoDescent is NEGATIVE below the baseline. WinDescent is POSITIVE below it —
+// the spec stores it unsigned — so the two cannot be compared or substituted
+// without a sign change.
+//
+// All five are zero when the font has no OS/2 table, the convention CapHeight
+// already follows. sTypoAscender − sTypoDescender is NOT required to equal
+// UnitsPerEm, and the spec says so explicitly, so a caller must not use that
+// identity as a validity check.
+func (f *Font) TypoAscent() int  { return f.sTypoAscender }
+func (f *Font) TypoDescent() int { return f.sTypoDescender }
+func (f *Font) TypoLineGap() int { return f.sTypoLineGap }
+
+// WinAscent and WinDescent return OS/2's usWinAscent and usWinDescent in font
+// units. WinDescent is POSITIVE below the baseline.
+//
+// ⛔ THESE ARE A CLIPPING EXTENT, NOT LINE SPACING, and the spec is unusually
+// blunt about it: "Some legacy applications use the usWinAscent and usWinDescent
+// values to determine default line spacing. This is strongly discouraged. The
+// sTypo* fields should be used for this purpose." They are the right values for
+// sizing a redraw or selection rectangle, and the wrong ones for leading.
+func (f *Font) WinAscent() int  { return f.usWinAscent }
+func (f *Font) WinDescent() int { return f.usWinDescent }
+
+// UseTypoMetrics reports fsSelection bit 7, USE_TYPO_METRICS: the font's own
+// statement that its sTypo* values, rather than its usWin* values, should decide
+// default line spacing. The bit was defined in OS/2 version 4, so a font with an
+// earlier table always reports false — which is not "prefer usWin*", only "this
+// font does not say".
+func (f *Font) UseTypoMetrics() bool { return f.fsSelection&useTypoMetricsBit != 0 }
+
+// useTypoMetricsBit is fsSelection bit 7 (OpenType 1.9.1, OS/2 fsSelection).
+const useTypoMetricsBit = 1 << 7
 
 // FontBBox returns the font bounding box in font units (head.xMin/yMin/xMax/yMax):
 // the union of every glyph's bounds. A PDF FontDescriptor's /FontBBox is this box
