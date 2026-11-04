@@ -141,7 +141,8 @@ caches rasterised glyphs and is **not** safe for concurrent use; build one
 | `(*Face).VerticalAdvance(r rune) int` / `(*Face).VerticalOrigin(r rune) (int, bool)` | Vertical writing-mode metrics. |
 | `(*Font).HasMath() bool` | Whether the font carries an OpenType `MATH` table. |
 | `(*Face).MathConstant(w MathConstant) int` / `(*Face).ItalicCorrection(g GlyphIndex) int` / `(*Face).MathVariants(g, vertical) ([]MathVariant, *MathAssembly)` | Pixel-scaled `MATH`-table metrics for a math-layout engine. |
-| `(*Font).Ascent/Descent/LineGap/FontBBox/CapHeight/XHeight/ItalicAngle/WeightClass/WidthClass/StemV/Flags/IsFixedPitch/IsItalic/IsSerif` | Font-descriptor scalars for PDF `/FontDescriptor` and CSS `@font-face`. |
+| `(*Font).Ascent/Descent/LineGap/FontBBox/CapHeight/XHeight/ItalicAngle/WeightClass/WidthClass/StemV/Flags/IsFixedPitch/IsItalic/IsSerif` | Font-descriptor scalars for PDF `/FontDescriptor` and CSS `@font-face`. `Ascent`/`Descent`/`LineGap` are **`hhea`'s**. |
+| `(*Font).TypoAscent/TypoDescent/TypoLineGap/WinAscent/WinDescent/UseTypoMetrics` | `OS/2`'s line metrics — the ones the spec **recommends for new text-layout implementations**, `hhea`'s being platform-specific. `TypoDescent` is negative below the baseline, `WinDescent` **positive**; `usWin*` are a clipping extent, not line spacing. |
 | `(*Font).Instance(coords map[string]float64) (*Font, error)` / `(*Font).InstanceBytes(coords) ([]byte, error)` | Bake a variable font to a static instance (as a `*Font` or a new sfnt blob). |
 | `(*Font).SubsetTrueType(gids []GlyphIndex) ([]byte, map[GlyphIndex]GlyphIndex, error)` | Cut a TrueType font to a glyph set, closing composites and returning the old→new id map. |
 | `(*Font).SubsetCFF(gids []GlyphIndex) ([]byte, error)` | Cut a CFF/OTTO font to a glyph set (closing `seac` accents). |
@@ -163,6 +164,11 @@ these, and `go doc github.com/go-opentype/opentype` for the full reference.
 - OS/2 + `head`/`post` **font-descriptor** scalars (`Ascent`, `Descent`,
   `FontBBox`, `CapHeight`, `XHeight`, `ItalicAngle`, `WeightClass`,
   `WidthClass`, `StemV`, `Flags`, …) for PDF/CSS embedding
+- OS/2 **typographic line metrics** — `TypoAscent`, `TypoDescent`,
+  `TypoLineGap`, `WinAscent`, `WinDescent`, `UseTypoMetrics` — which the
+  OpenType spec names for new text-layout work, `hhea`'s ascender/descender
+  being Apple-specific. A layout engine should read the `sTypo*` set, honour
+  `USE_TYPO_METRICS`, and leave `usWin*` for clipping regions
 - **subsetting** — `SubsetTrueType` (glyf, composite-closure aware, with an
   old→new id map) and `SubsetCFF` (`seac`-closure aware)
 - the OpenType **`MATH`** table — math-typesetting metrics (constants, per-glyph
