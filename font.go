@@ -92,9 +92,18 @@ type Font struct {
 	weightClass  int    // OS/2 usWeightClass (100..900), 0 when absent
 	widthClass   int    // OS/2 usWidthClass (1..9), 0 when absent
 	sFamilyClass int    // OS/2 sFamilyClass (high byte is the IBM font class)
-	fsSelection  uint16 // OS/2 fsSelection bits (bit 0 italic)
+	fsSelection  uint16 // OS/2 fsSelection bits (bit 0 italic, bit 7 USE_TYPO_METRICS)
 	sCapHeight   int    // OS/2 sCapHeight, font units (version >= 2), 0 when absent
 	sxHeight     int    // OS/2 sxHeight, font units (version >= 2), 0 when absent
+
+	// The OS/2 line-metric set, present from version 0. The spec names these — not
+	// hhea's — for new text-layout implementations, and usWinDescent is POSITIVE
+	// below the baseline where sTypoDescender and hhea.descender are negative.
+	sTypoAscender  int // OS/2 sTypoAscender, font units
+	sTypoDescender int // OS/2 sTypoDescender, font units (negative below the baseline)
+	sTypoLineGap   int // OS/2 sTypoLineGap, font units
+	usWinAscent    int // OS/2 usWinAscent, font units (a clipping extent, not line spacing)
+	usWinDescent   int // OS/2 usWinDescent, font units, POSITIVE below the baseline
 
 	postPresent  bool    // a post table was present and long enough to decode
 	italicAngle  float64 // post italicAngle (degrees, 0 for upright)
