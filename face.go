@@ -19,8 +19,14 @@ type Metrics struct {
 // Face renders a Font at a fixed pixel size. It caches rasterised glyphs and
 // is not safe for concurrent use; build one Face per goroutine if needed.
 type Face struct {
-	font   *Font
+	font *Font
+	// sizePx is the RASTERISER's ppem, rounded to a whole pixel: hinting is
+	// defined on a whole-pixel grid (head flags bit 3). size is the em size as the
+	// caller asked for it, and scale — size/unitsPerEm — is what every metric is
+	// multiplied by. The two are kept apart so a caller working in a finer unit
+	// than the pixel can have exact metrics and a hinted raster at once.
 	sizePx int
+	size   float64
 	scale  float64
 	cache  map[GlyphIndex]cachedGlyph
 
@@ -60,14 +66,47 @@ func roundInt(v float64) int { return int(math.Round(v)) }
 
 // NewFace returns a Face that renders f at sizePx pixels per em. The scale
 // factor is sizePx / unitsPerEm; sizePx should be positive.
-func (f *Font) NewFace(sizePx int) *Face {
+//
+// For a size that is not a whole number of pixels, use [Font.NewFaceAt].
+func (f *Font) NewFace(sizePx int) *Face { return f.NewFaceAt(float64(sizePx)) }
+
+// NewFaceAt returns a Face that renders f at size pixels per em, where size may
+// be FRACTIONAL. The metric scale is size / unitsPerEm exactly.
+//
+// The OpenType specification allows this. head.flags bit 3 reads "Force ppem to
+// integer values for all internal scaler math; may use fractional ppem sizes if
+// this bit is clear. It is strongly recommended that this be set in hinted fonts."
+// — so the integer constraint belongs to the SCALER, not to the metrics, and this
+// Face keeps the two apart: fc.scale is exact, while the whole-pixel ppem the
+// TrueType interpreter and CFF stem darkening need is the rounded value.
+//
+// ⛔⛔ WHY THIS EXISTS. A caller that works in a unit finer than the pixel cannot
+// express its sizes through an int. LaTeX's size ladder is a table of fractional
+// points — \Large is 14.4pt, \LARGE 17.28, \huge 20.74 — and go-tex, which
+// measures in scaled points (1/65536 pt), was obliged to round every step to a
+// whole pixel before asking for a face: \Large came out at 14, 2.8% narrow, on
+// every section heading of every document (go-opentype/opentype#61).
+//
+// Such a caller already reads metrics in FONT UNITS and scales them itself —
+// AdvanceIndexUnits, KernUnits — precisely to avoid this library's own rounding.
+// That arithmetic was exact in every term but one: Scale() itself was anchored on
+// an integer. This is the term.
+func (f *Font) NewFaceAt(size float64) *Face {
 	return &Face{
-		font:   f,
-		sizePx: sizePx,
-		scale:  float64(sizePx) / float64(f.unitsPerEm),
+		font: f,
+		// The rasteriser's ppem. Hinting is defined on a whole-pixel grid (head
+		// flags bit 3), and the interpreter is handed this, not the exact size.
+		sizePx: roundInt(size),
+		size:   size,
+		scale:  size / float64(f.unitsPerEm),
 		cache:  map[GlyphIndex]cachedGlyph{},
 	}
 }
+
+// Size returns the face's em size in pixels, as it was asked for — fractional
+// when the face was built with [Font.NewFaceAt]. [Face.Scale] is this divided by
+// the font's unitsPerEm.
+func (fc *Face) Size() float64 { return fc.size }
 
 // Font returns the Font this Face renders. It lets a shaper reach the font's
 // layout tables ([Font.GSUB], [Font.GPOS]) and per-glyph metrics
