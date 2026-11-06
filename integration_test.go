@@ -244,6 +244,111 @@ func TestFaceKernLegacyTable(t *testing.T) {
 	}
 }
 
+// kernGPOSLookups builds a GPOS blob whose "kern" feature references one
+// pair-kern lookup per adjustment given, in list order, each covering the same
+// (left,right) pair. It is the shape a font takes when it files kerning in
+// several passes.
+func kernGPOSLookups(left, right GlyphIndex, adjs ...int16) []byte {
+	var lks [][]byte
+	var refs []uint16
+	for i, adj := range adjs {
+		sub := buildPairPos1(buildCoverage1(left), vfXAdvance, 0, [][]byte{
+			buildPairSet(vfXAdvance, 0, []pv{{second: right, xa1: adj}}),
+		})
+		lks = append(lks, buildLookup(2, [][]byte{sub}))
+		refs = append(refs, uint16(i))
+	}
+	scripts := []tScript{{tag: "DFLT", def: &tLangSys{required: 0xFFFF, features: []uint16{0}}}}
+	feats := []tFeature{{tag: "kern", lookups: refs}}
+	return buildLayoutTable(scripts, feats, lks)
+}
+
+// TestFaceKernAccumulatesAcrossLookups is the regression guard for a pair whose
+// real adjustment lives in a later lookup than the first one covering it.
+// Libertinus Serif is such a font: its first kern lookup covers A/V with 0 and
+// a later one covers it with -112, so stopping at the first covering lookup
+// reported no kerning at all and A/V came out 1.12pt too wide at 10pt against
+// XeTeX. OpenType processes lookups "in the order the lookup definitions occur
+// in the LookupList", each acting "on the positioning results of the previous
+// lookups" (spec chapter 2), so their adjustments add.
+func TestFaceKernAccumulatesAcrossLookups(t *testing.T) {
+	// Lookup 0 covers the pair with an explicit zero; lookup 1 carries the
+	// value. This is the Libertinus shape, reduced to its two lookups.
+	f := makeFont(t, [][]byte{nil, squareGlyph(), squareGlyph()},
+		map[rune]uint16{'A': 1, 'V': 2},
+		map[string][]byte{"GPOS": kernGPOSLookups(1, 2, 0, -112)})
+	if got := f.NewFace(1000).KernUnits('A', 'V'); got != -112 {
+		t.Errorf("KernUnits('A','V') = %v, want -112 (lookup 1, past the zero in lookup 0)", got)
+	}
+
+	// The control: a font filing the same pair in a single lookup must be
+	// unchanged by the rule above. TeX Gyre Termes is the real one; -130 is
+	// the value it reports for A/V.
+	g := makeFont(t, [][]byte{nil, squareGlyph(), squareGlyph()},
+		map[rune]uint16{'A': 1, 'V': 2},
+		map[string][]byte{"GPOS": kernGPOSLookups(1, 2, -130)})
+	if got := g.NewFace(1000).KernUnits('A', 'V'); got != -130 {
+		t.Errorf("single-lookup KernUnits('A','V') = %v, want -130 unchanged", got)
+	}
+
+	// Two lookups that each carry a value accumulate; neither alone is the
+	// answer, which is what tells accumulation from "the last one wins".
+	h := makeFont(t, [][]byte{nil, squareGlyph(), squareGlyph()},
+		map[rune]uint16{'A': 1, 'V': 2},
+		map[string][]byte{"GPOS": kernGPOSLookups(1, 2, -40, -72)})
+	if got := h.NewFace(1000).KernUnits('A', 'V'); got != -112 {
+		t.Errorf("two valued lookups = %v, want -112 (-40 + -72)", got)
+	}
+}
+
+// TestFaceKernFirstSubtableEndsItsLookup is the other half of the rule, and the
+// reason the fix is not simply "add everything that matches": within one
+// lookup, once a subtable matches "processing of the lookup is finished - no
+// further subtables are processed for that position" (spec chapter 2). Only the
+// first of the two subtables below may contribute.
+func TestFaceKernFirstSubtableEndsItsLookup(t *testing.T) {
+	sub := func(adj int16) []byte {
+		return buildPairPos1(buildCoverage1(1), vfXAdvance, 0, [][]byte{
+			buildPairSet(vfXAdvance, 0, []pv{{second: 2, xa1: adj}}),
+		})
+	}
+	lk := buildLookup(2, [][]byte{sub(-50), sub(-7)})
+	scripts := []tScript{{tag: "DFLT", def: &tLangSys{required: 0xFFFF, features: []uint16{0}}}}
+	feats := []tFeature{{tag: "kern", lookups: []uint16{0}}}
+	f := makeFont(t, [][]byte{nil, squareGlyph(), squareGlyph()},
+		map[rune]uint16{'A': 1, 'V': 2},
+		map[string][]byte{"GPOS": buildLayoutTable(scripts, feats, [][]byte{lk})})
+	if got := f.NewFace(1000).KernUnits('A', 'V'); got != -50 {
+		t.Errorf("KernUnits('A','V') = %v, want -50 (the second subtable must not apply)", got)
+	}
+}
+
+// TestFaceKernGPOSZeroBeatsLegacyTable fixes which source answers for a pair
+// GPOS covers with zero. A zero in a pair-adjustment lookup is the font saying
+// "no adjustment between these two", which is an answer; the legacy kern table
+// is consulted only for pairs no GPOS lookup mentions.
+func TestFaceKernGPOSZeroBeatsLegacyTable(t *testing.T) {
+	legacy := buildKernTable([][]byte{buildKernFormat0([]kernPair{
+		{left: 1, right: 2, value: -50},
+		{left: 1, right: 3, value: -60},
+	})})
+	f := makeFont(t, [][]byte{nil, squareGlyph(), squareGlyph(), squareGlyph()},
+		map[rune]uint16{'A': 1, 'V': 2, 'W': 3},
+		map[string][]byte{"GPOS": kernGPOSLookups(1, 2, 0), "kern": legacy})
+	if f.gpos == nil || f.kern == nil {
+		t.Fatalf("expected both sources: gpos=%v kern=%v", f.gpos != nil, f.kern != nil)
+	}
+	fc := f.NewFace(1000)
+	if got := fc.KernUnits('A', 'V'); got != 0 {
+		t.Errorf("KernUnits('A','V') = %v, want 0 (GPOS covers it with zero)", got)
+	}
+	// The pair GPOS says nothing about still reaches the legacy table, so the
+	// rule above narrowed the fallback rather than removing it.
+	if got := fc.KernUnits('A', 'W'); got != -60 {
+		t.Errorf("KernUnits('A','W') = %v, want -60 from the legacy table", got)
+	}
+}
+
 // --- 4. GSUB shaping --------------------------------------------------------
 
 // ligaGSUB builds a GSUB blob whose "liga" feature collapses first+rest into

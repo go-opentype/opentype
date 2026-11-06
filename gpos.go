@@ -1612,7 +1612,34 @@ func (h *layoutHeader) selectLookupsDefault(want map[string]bool) []int {
 // kern feature is resolved with the default script-agnostic fallback, so fonts
 // that file kerning under a real script (not DFLT) still resolve.
 func (p *gpos) Kern(left, right GlyphIndex) int {
+	v, _ := p.kernCovered(left, right)
+	return v
+}
+
+// kernCovered is Kern plus the fact Kern cannot express: whether any pair
+// lookup covered the pair at all. A pair covered with an explicit zero is a
+// deliberate "no adjustment here", which a caller must be able to tell from
+// "GPOS says nothing about this pair" before it reaches for another source.
+//
+// The two nested loops are not the same rule, and conflating them was the
+// defect this function replaces. Within one lookup, OpenType stops at the
+// first subtable that matches: "If the glyph sequence does match the pattern
+// of a subtable, then the operations of that subtable are performed and
+// processing of the lookup is finished - no further subtables are processed
+// for that position in the glyph sequence." Across lookups it does not stop:
+// the client "processes the lookups referenced by these features in the order
+// the lookup definitions occur in the LookupList", and "as each lookup is
+// processed, it acts on the substitution or positioning results of the
+// previous lookups" - so the adjustments of successive lookups accumulate.
+// (OpenType spec, chapter 2, "Lookup processing order".)
+//
+// Libertinus Serif is the font that showed the difference: it files four
+// separate kern feature records, and its lookup 0 covers A/V with 0 while its
+// lookup 6 covers the same pair with -112. Returning at the first covering
+// lookup returned that 0 and never reached the real value.
+func (p *gpos) kernCovered(left, right GlyphIndex) (int, bool) {
 	idxs := p.selectLookupsDefault(map[string]bool{"kern": true})
+	total, covered := 0, false
 	for _, li := range idxs {
 		if li >= len(p.lookups) {
 			continue
@@ -1623,11 +1650,13 @@ func (p *gpos) Kern(left, right GlyphIndex) int {
 				continue
 			}
 			if v, ok := pp.kern(left, right); ok {
-				return v
+				total += v
+				covered = true
+				break // this lookup is finished for this position
 			}
 		}
 	}
-	return 0
+	return total, covered
 }
 
 // Kerner combines GPOS and the legacy kern table: GPOS is preferred and the
@@ -1638,11 +1667,14 @@ type Kerner struct {
 	kern *kern
 }
 
-// Kerning returns the X-advance adjustment between left and right, preferring a
-// non-zero GPOS value and otherwise falling back to the legacy kern table.
+// Kerning returns the X-advance adjustment between left and right. GPOS wins
+// wherever it covers the pair, including when it covers it with zero: a pair
+// listed in a pair-adjustment lookup with no adjustment is the font saying
+// "nothing here", which is an answer and not a silence. Only a pair no GPOS
+// lookup mentions falls through to the legacy kern table.
 func (kn *Kerner) Kerning(left, right GlyphIndex) int {
 	if kn.gpos != nil {
-		if v := kn.gpos.Kern(left, right); v != 0 {
+		if v, covered := kn.gpos.kernCovered(left, right); covered {
 			return v
 		}
 	}
