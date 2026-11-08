@@ -55,7 +55,50 @@ var defaultPosFeatures = []string{"kern", "mark", "mkmk"}
 // advance in whole pixels at the face's size. A font lacking GSUB or GPOS simply
 // skips that stage; with neither the run is the plain cmap mapping at its
 // unadjusted advances.
+// ⛔ IT ROUNDS EACH GLYPH'S PLACEMENT AND ADVANCE, and for a run that is the
+// worst place to do it: the error does not stay under half a pixel, it
+// accumulates along the line. A typesetter wants ShapePositionedUnits.
 func (fc *Face) ShapePositioned(text string, features ...string) []PositionedGlyph {
+	exact := fc.ShapePositionedUnits(text, features...)
+	out := make([]PositionedGlyph, len(exact))
+	for i, g := range exact {
+		out[i] = PositionedGlyph{
+			Glyph:    g.Glyph,
+			XOffset:  roundInt(g.XOffset),
+			YOffset:  roundInt(g.YOffset),
+			XAdvance: roundInt(g.XAdvance),
+		}
+	}
+	return out
+}
+
+// PositionedGlyphUnits is one glyph of a positioned run produced by
+// ShapePositionedUnits: the same thing PositionedGlyph carries, in pixels at the
+// face's size WITHOUT rounding.
+type PositionedGlyphUnits struct {
+	Glyph    GlyphIndex
+	XOffset  float64
+	YOffset  float64
+	XAdvance float64
+}
+
+// ShapePositionedUnits is ShapePositioned with no rounding: the run a caller
+// gets when it intends to place glyphs at a fraction of a pixel.
+//
+// ⛔⛔ WHY THIS DECIDES WHETHER SHAPING CAN BE SHARED AT ALL. The whole point of
+// ShapePositioned is that a text engine should not hand-roll cmap + ligatures +
+// kerning + mark attachment for itself. But its result was integral, and a
+// consumer that sets type at 10pt — where one pixel is one point — cannot accept
+// half a point of error per glyph. So the engine that most needed this call
+// measured its own advances instead (AdvanceIndexUnits × Scale, exact) and got
+// NO ligatures and NO mark attachment as the price of keeping its metrics: the
+// correct, shared path was lossier than the hand-rolled one it replaced.
+//
+// The computation was always exact — advances and GPOS adjustments are carried in
+// font units right up to the last three lines — so this adds no arithmetic. It
+// stops throwing the precision away at the door, and ShapePositioned is now this
+// function rounded, which is the only way the two cannot drift apart.
+func (fc *Face) ShapePositionedUnits(text string, features ...string) []PositionedGlyphUnits {
 	var glyphs []GlyphIndex
 	for _, r := range text {
 		gid, _ := fc.font.GlyphIndex(r) // unmapped -> 0 (.notdef)
@@ -75,7 +118,7 @@ func (fc *Face) ShapePositioned(text string, features ...string) []PositionedGly
 		posFeatures := append(append([]string(nil), features...), defaultPosFeatures...)
 		positions = fc.font.gpos.position(glyphs, advances, posFeatures...)
 	}
-	out := make([]PositionedGlyph, len(glyphs))
+	out := make([]PositionedGlyphUnits, len(glyphs))
 	for i, g := range glyphs {
 		adv := advances[i]
 		var xOff, yOff int
@@ -84,11 +127,11 @@ func (fc *Face) ShapePositioned(text string, features ...string) []PositionedGly
 			yOff = positions[i].YOffset
 			adv += positions[i].XAdvance
 		}
-		out[i] = PositionedGlyph{
+		out[i] = PositionedGlyphUnits{
 			Glyph:    g,
-			XOffset:  roundInt(float64(xOff) * fc.scale),
-			YOffset:  roundInt(float64(yOff) * fc.scale),
-			XAdvance: roundInt(float64(adv) * fc.scale),
+			XOffset:  float64(xOff) * fc.scale,
+			YOffset:  float64(yOff) * fc.scale,
+			XAdvance: float64(adv) * fc.scale,
 		}
 	}
 	return out
