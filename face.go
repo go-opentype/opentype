@@ -150,9 +150,15 @@ func (fc *Face) hAdvanceUnits(gid GlyphIndex) float64 {
 	return adv
 }
 
-// Advance returns the horizontal advance of r in pixels, or 0 if the rune is
-// not mapped by the font's cmap. When a variation is set the HVAR delta (or the
-// gvar phantom-point fallback) is included.
+// Advance returns the horizontal advance of r in WHOLE pixels, or 0 if the rune
+// is not mapped by the font's cmap. When a variation is set the HVAR delta (or
+// the gvar phantom-point fallback) is included.
+//
+// ⛔ IT ROUNDS, and at a text size that is coarse: a consumer laying out text
+// wants AdvanceUnits. On STIXTwoMath at 10pt — where one pixel is one point —
+// the space advance is 2.35 and this returns 2. A typesetter reading it puts
+// every interword space 0.35pt narrow, which is ~3.9pt per 66-character line.
+// go-tex did exactly that until it was measured.
 func (fc *Face) Advance(r rune) int {
 	gid, ok := fc.font.GlyphIndex(r)
 	if !ok {
@@ -161,6 +167,26 @@ func (fc *Face) Advance(r rune) int {
 	return roundInt(fc.hAdvanceUnits(gid) * fc.scale)
 }
 
+// AdvanceUnits returns the horizontal advance of r in pixels WITHOUT rounding,
+// or 0 if the rune is not mapped by the font's cmap.
+//
+// It is Advance's exact counterpart, as AdvanceIndexUnits is AdvanceIndex's.
+// A layout engine that accumulates advances must use this one: rounding each
+// glyph to a whole pixel accumulates along the line, and the error does not
+// cancel — it is a bias toward whatever side the font's widths happen to fall.
+func (fc *Face) AdvanceUnits(r rune) float64 {
+	gid, ok := fc.font.GlyphIndex(r)
+	if !ok {
+		return 0
+	}
+	return fc.hAdvanceUnits(gid) * fc.scale
+}
+
+// ⛔ Measure sums ROUNDED advances, so its error compounds with the length of s
+// rather than staying under half a pixel: it is the sum of each rune's Advance,
+// not the rounded sum of the exact advances. For a measurement a layout decision
+// depends on, accumulate AdvanceUnits and round once at the end.
+//
 // Measure returns the total advance width of s in pixels (the sum of each
 // rune's Advance).
 func (fc *Face) Measure(s string) int {

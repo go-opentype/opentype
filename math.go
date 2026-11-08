@@ -559,6 +559,29 @@ func (f *Font) IsExtendedShapeGlyph(gid GlyphIndex) bool {
 // scaleUnit converts a design-unit value to whole pixels at the face's size.
 func (fc *Face) scaleUnit(v int32) int { return roundInt(float64(v) * fc.scale) }
 
+// scaleUnitF converts a design-unit value to pixels at the face's size WITHOUT
+// rounding.
+//
+// ⛔⛔ WHY EVERY MATH ACCESSOR NEEDS AN UNROUNDED FORM. The spec is explicit that
+// these are fractional quantities — "These values are expressed in font design
+// units" (OpenType MATH, MathValueRecord) — and a MATH table is read by engines
+// that position to a fraction of a point. Measured on testdata/STIXTwoMath at
+// 10pt, where one pixel is one point:
+//
+//	axisHeight            258 units -> 2.58pt exact, rounded to 3
+//	italic corrections    882 non-zero, 840 of them differ from exact,
+//	                      worst loss 0.5pt
+//
+// The axis is where every fraction bar and every relation symbol is centred, so
+// a 0.42pt error there is on every formula of every page. TeX computes these in
+// scaled points, 1/65536 of a point, and cannot use a value quantised to one.
+//
+// ⛔ The reason this was invisible: the only real-font MATH test builds its face
+// with NewFace(unitsPerEm) — scale 1.0, pixels ARE design units — which is the
+// one scale at which rounding changes nothing. A control that cannot see the
+// defect it would be the one to catch.
+func (fc *Face) scaleUnitF(v int32) float64 { return float64(v) * fc.scale }
+
 // MathConstant returns the MathConstants value which, pixel-scaled at the face's
 // size — except the three percentage constants, which are pure ratios and
 // returned verbatim. It returns 0 when the font has no MATH constants or which
@@ -575,6 +598,24 @@ func (fc *Face) MathConstant(which MathConstant) int {
 	return fc.scaleUnit(v)
 }
 
+// MathConstantUnits is MathConstant without the rounding: the value in pixels at
+// the face's size, as a fraction. The three percentage constants are pure ratios
+// and come back verbatim, as they do from MathConstant.
+//
+// AxisHeight is the one to reach for first and the one that shows why this
+// exists: on STIXTwoMath at 10pt it is 2.58, and MathConstant answers 3.
+func (fc *Face) MathConstantUnits(which MathConstant) float64 {
+	m := fc.font.math
+	if m == nil || !m.hasConstants || which < 0 || which >= mathConstCount {
+		return 0
+	}
+	v := m.constants[which]
+	if which.isPercent() {
+		return float64(v)
+	}
+	return fc.scaleUnitF(v)
+}
+
 // ItalicCorrection returns glyph gid's math italic correction in pixels, or 0
 // when the glyph has none (or the font carries no MATH table). It is the space
 // to insert after a slanted glyph before a following upright one, and the
@@ -585,6 +626,22 @@ func (fc *Face) ItalicCorrection(gid GlyphIndex) int {
 		return 0
 	}
 	return fc.scaleUnit(m.italicCorr[gid])
+}
+
+// ItalicCorrectionUnits is ItalicCorrection without the rounding.
+//
+// The spec adds this value to a glyph's advance in one case — "when a run of
+// slanted characters is followed by a straight character (such as an operator or
+// a delimiter), the italics correction of the last glyph is added to its advance
+// width" — and uses halves of it to place limits above and below. A quantity that
+// is halved cannot be delivered pre-rounded: on STIXTwoMath at 10pt, 840 of the
+// font's 882 non-zero corrections do not survive the round trip.
+func (fc *Face) ItalicCorrectionUnits(gid GlyphIndex) float64 {
+	m := fc.font.math
+	if m == nil {
+		return 0
+	}
+	return fc.scaleUnitF(m.italicCorr[gid])
 }
 
 // TopAccentAttachment returns the x position (in pixels from the glyph origin)
@@ -601,6 +658,21 @@ func (fc *Face) TopAccentAttachment(gid GlyphIndex) (int, bool) {
 		return 0, false
 	}
 	return fc.scaleUnit(v), true
+}
+
+// TopAccentAttachmentUnits is TopAccentAttachment without the rounding: an
+// accent is CENTRED on this x, so half of any error in it is visible as the
+// accent sitting off-centre over its base.
+func (fc *Face) TopAccentAttachmentUnits(gid GlyphIndex) (float64, bool) {
+	m := fc.font.math
+	if m == nil {
+		return 0, false
+	}
+	v, ok := m.topAccent[gid]
+	if !ok {
+		return 0, false
+	}
+	return fc.scaleUnitF(v), true
 }
 
 // MathKern returns the math cut-in kern (in pixels) for glyph gid at the given
@@ -625,6 +697,39 @@ func (fc *Face) MathKern(gid GlyphIndex, corner MathKernCorner, correctionHeight
 	}
 	hUnits := int32(roundInt(float64(correctionHeight) / fc.scale))
 	return fc.scaleUnit(k.valueAt(hUnits))
+}
+
+// MathKernUnits is MathKern with neither rounding: correctionHeight arrives in
+// pixels as a fraction and the kern comes back the same way.
+//
+// ⛔ MathKern quantises TWICE — it rounds the caller's height back into design
+// units and then rounds the kern — so a caller holding a fractional attachment
+// height has to throw it away before asking, and gets a whole pixel back. The
+// cut-in kern exists to tuck a script into the slope of a glyph, which is a
+// sub-point adjustment or nothing at all.
+func (fc *Face) MathKernUnits(gid GlyphIndex, corner MathKernCorner, correctionHeight float64) float64 {
+	m := fc.font.math
+	if m == nil {
+		return 0
+	}
+	rec := m.kern[gid]
+	if rec == nil {
+		return 0
+	}
+	if corner < 0 || corner > MathKernBottomLeft {
+		return 0
+	}
+	k := rec.corners[corner]
+	if k == nil {
+		return 0
+	}
+	if fc.scale == 0 {
+		return 0
+	}
+	// The height is still resolved in design units, because that is the unit the
+	// font's correction-height records are in; only the ROUNDING of it goes.
+	hUnits := int32(correctionHeight / fc.scale)
+	return fc.scaleUnitF(k.valueAt(hUnits))
 }
 
 // MathVariants returns the size variants and the stretchy-glyph assembly for
