@@ -31,6 +31,8 @@ type Face struct {
 	cache  map[GlyphIndex]cachedGlyph
 	// phased holds glyphs rasterised at a sub-pixel phase (see GlyphMaskIndexAt).
 	phased map[phasedKey]cachedGlyph
+	// outlines holds each glyph's flattened outline, decoded once (see flat).
+	outlines map[GlyphIndex]flatGlyph
 
 	// varCoords, when non-nil, instances a variable font's glyf outlines at the
 	// given user-space axis coordinates before rasterising (see SetVariation).
@@ -206,6 +208,9 @@ func (fc *Face) glyph(gid GlyphIndex) cachedGlyph {
 		return cg
 	}
 	cg := fc.render(gid)
+	if len(fc.cache) >= maxCachedGlyphs {
+		fc.cache = map[GlyphIndex]cachedGlyph{}
+	}
 	fc.cache[gid] = cg
 	return cg
 }
@@ -246,7 +251,7 @@ func (fc *Face) GlyphMaskIndexAt(gid GlyphIndex, x float64, y int) (bounds image
 	cg, hit := fc.phased[key]
 	if !hit {
 		cg = fc.renderAt(gid, float64(phase)/SubpixelPhases)
-		if fc.phased == nil {
+		if fc.phased == nil || len(fc.phased) >= maxPhasedGlyphs {
 			fc.phased = map[phasedKey]cachedGlyph{}
 		}
 		fc.phased[key] = cg
@@ -260,23 +265,54 @@ func (fc *Face) GlyphMaskIndexAt(gid GlyphIndex, x float64, y int) (bounds image
 // render decodes and rasterises glyph gid at the face's size.
 func (fc *Face) render(gid GlyphIndex) cachedGlyph { return fc.renderAt(gid, 0) }
 
-// renderAt is render with the outline shifted right by dx pixels.
+// Bounds on the per-face caches, in entries: a font may hold 65535 glyphs and a
+// page may ask for any of them, so a cache that only grows is a memory bomb. A
+// cache that reaches its bound is emptied (a page's working set is small and
+// refills at once; an adversarial one only costs time, never memory).
+var (
+	maxCachedGlyphs = 4096                             // masks at phase 0, and flattened outlines
+	maxPhasedGlyphs = maxCachedGlyphs * SubpixelPhases // masks at any phase (variables so a test can lower them)
+)
+
+// flatGlyph is one glyph's outline, decoded and flattened to polygons once.
+type flatGlyph struct {
+	polys [][]fpoint
+	ok    bool
+}
+
+// flat returns glyph gid's flattened outline at the face's size, decoding it on
+// first use: decoding (the glyf program, gvar deltas) and flattening are most of
+// what rasterising a glyph costs, and every sub-pixel phase of it needs the same
+// polygons, only shifted. Reset with the face's other caches when the face
+// changes (SetVariation, SetHinting, SetStemDarkening).
+func (fc *Face) flat(gid GlyphIndex) flatGlyph {
+	if g, ok := fc.outlines[gid]; ok {
+		return g
+	}
+	g := flatGlyph{}
+	if contours, err := fc.outline(gid); err == nil {
+		g.ok = true
+		g.polys = make([][]fpoint, 0, len(contours))
+		for _, c := range contours {
+			if p := flattenContour(c, fc.scale); len(p) >= 3 {
+				g.polys = append(g.polys, p)
+			}
+		}
+	}
+	if fc.outlines == nil || len(fc.outlines) >= maxCachedGlyphs {
+		fc.outlines = make(map[GlyphIndex]flatGlyph)
+	}
+	fc.outlines[gid] = g
+	return g
+}
+
+// renderAt rasterises glyph gid with its outline shifted right by dx pixels.
 func (fc *Face) renderAt(gid GlyphIndex, dx float64) cachedGlyph {
-	contours, err := fc.outline(gid)
-	if err != nil {
+	g := fc.flat(gid)
+	if !g.ok {
 		return cachedGlyph{ok: false}
 	}
-	polys := make([][]fpoint, 0, len(contours))
-	for _, c := range contours {
-		p := flattenContour(c, fc.scale)
-		for i := range p {
-			p[i].x += dx
-		}
-		if len(p) >= 3 {
-			polys = append(polys, p)
-		}
-	}
-	bounds, mask := rasterize(polys)
+	bounds, mask := rasterizeAt(g.polys, dx)
 	return cachedGlyph{bounds: bounds, mask: mask, ok: true}
 }
 
@@ -395,6 +431,7 @@ func (fc *Face) SetVariation(coords map[string]float64) {
 	fc.varNorm = fc.font.NormalizeCoords(coords)
 	fc.cache = map[GlyphIndex]cachedGlyph{}
 	fc.phased = nil
+	fc.outlines = nil
 }
 
 // SetHinting enables or disables the TrueType instruction interpreter. When
@@ -406,6 +443,7 @@ func (fc *Face) SetHinting(on bool) {
 	fc.hinting = on
 	fc.cache = map[GlyphIndex]cachedGlyph{}
 	fc.phased = nil
+	fc.outlines = nil
 }
 
 // SetStemDarkening enables or disables stem darkening (weight compensation) for
@@ -420,6 +458,7 @@ func (fc *Face) SetStemDarkening(on bool) {
 	fc.stemDarken = on
 	fc.cache = map[GlyphIndex]cachedGlyph{}
 	fc.phased = nil
+	fc.outlines = nil
 }
 
 // hintInterp lazily builds the interpreter for this face (running the font

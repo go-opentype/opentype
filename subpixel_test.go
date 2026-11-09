@@ -99,3 +99,52 @@ func TestGlyphMaskIndexAtRoundingAndAdvance(t *testing.T) {
 		t.Error("an out-of-range glyph drew")
 	}
 }
+
+// The per-face caches are bounded: a font may hold 65535 glyphs and a page may
+// ask for all of them. At the bound a cache is emptied, and everything it held
+// is rebuilt on demand with the same result.
+func TestFaceCachesAreBounded(t *testing.T) {
+	defer func(a, b int) { maxCachedGlyphs, maxPhasedGlyphs = a, b }(maxCachedGlyphs, maxPhasedGlyphs)
+	maxCachedGlyphs, maxPhasedGlyphs = 8, 8
+	fc, _ := subpixelFace(t, 20)
+	want := map[GlyphIndex]int{}
+	for g := 0; g < 100; g++ {
+		gid := GlyphIndex(g)
+		_, m, _, _, ok := fc.GlyphMaskIndex(gid, 0, 0)
+		if ok && m != nil {
+			want[gid] = len(m.Pix)
+		}
+		fc.GlyphMaskIndexAt(gid, 0.25, 0)
+		fc.GlyphMaskIndexAt(gid, 0.5, 0)
+		if len(fc.cache) > 8 || len(fc.outlines) > 8 || len(fc.phased) > 8 {
+			t.Fatalf("glyph %d: caches hold %d, %d, %d entries, bound 8", g, len(fc.cache), len(fc.outlines), len(fc.phased))
+		}
+	}
+	if len(want) < 50 {
+		t.Fatalf("only %d glyphs drew", len(want))
+	}
+	for gid, size := range want {
+		if _, m, _, _, _ := fc.GlyphMaskIndex(gid, 0, 0); len(m.Pix) != size {
+			t.Fatalf("glyph %d: rebuilt mask differs", gid)
+		}
+	}
+}
+
+// One decode serves every phase: the flattened outline is cached per glyph, and
+// reset when the face changes.
+func TestFlatOutlineIsCachedPerGlyph(t *testing.T) {
+	fc, gid := subpixelFace(t, 20)
+	a := fc.flat(gid)
+	fc.GlyphMaskIndexAt(gid, 0.25, 0)
+	fc.GlyphMaskIndexAt(gid, 0.75, 0)
+	if len(fc.outlines) != 1 || len(a.polys) == 0 || &fc.flat(gid).polys[0] != &a.polys[0] {
+		t.Error("the flattened outline was decoded more than once")
+	}
+	fc.SetVariation(nil)
+	if fc.outlines != nil {
+		t.Error("the outline cache survived a face change")
+	}
+	if fc.flat(GlyphIndex(60000)).ok {
+		t.Error("an out-of-range glyph has an outline")
+	}
+}
