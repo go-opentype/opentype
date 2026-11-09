@@ -30,18 +30,18 @@ func flattenContour(c contour, scale float64) []fpoint {
 		x, y float64
 		on   bool
 	}
-	pts := make([]dp, n)
-	for i, p := range c {
-		pts[i] = dp{x: p.x * scale, y: -p.y * scale, on: p.on}
+	scaled := func(i int) dp {
+		p := c[i]
+		return dp{x: p.x * scale, y: -p.y * scale, on: p.on}
 	}
 
 	// Insert an implied on-curve midpoint between any two consecutive
 	// off-curve points (walking the contour cyclically).
 	q := make([]dp, 0, n*2)
 	for i := 0; i < n; i++ {
-		a := pts[i]
+		a := scaled(i)
 		q = append(q, a)
-		b := pts[(i+1)%n]
+		b := scaled((i + 1) % n)
 		if !a.on && !b.on {
 			q = append(q, dp{x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, on: true})
 		}
@@ -53,20 +53,21 @@ func flattenContour(c contour, scale float64) []fpoint {
 	for !q[s].on {
 		s++
 	}
-	ordered := append(append([]dp{}, q[s:]...), q[:s]...)
-	m := len(ordered)
+	m := len(q)
+	at := func(k int) dp { return q[(s+k)%m] }
 
-	poly := []fpoint{{x: ordered[0].x, y: ordered[0].y}}
+	poly := make([]fpoint, 1, m*3)
+	poly[0] = fpoint{x: at(0).x, y: at(0).y}
 	i := 0
 	for i < m {
-		next := ordered[(i+1)%m]
+		next := at(i + 1)
 		if next.on {
 			poly = append(poly, fpoint{x: next.x, y: next.y})
 			i++
 			continue
 		}
-		cur := ordered[i]
-		end := ordered[(i+2)%m]
+		cur := at(i)
+		end := at(i + 2)
 		flattenQuad(&poly, cur.x, cur.y, next.x, next.y, end.x, end.y)
 		i += 2
 	}
@@ -123,7 +124,11 @@ func insideNonZero(polys [][]fpoint, x, y float64) bool {
 // device-space bounds (relative to the glyph origin) and an *image.Alpha whose
 // own rectangle starts at (0,0). An empty polygon set yields an empty rect and
 // a nil mask.
-func rasterize(polys [][]fpoint) (image.Rectangle, *image.Alpha) {
+func rasterize(polys [][]fpoint) (image.Rectangle, *image.Alpha) { return rasterizeAt(polys, 0) }
+
+// rasterizeAt is rasterize with the polygons shifted right by dx pixels, so one
+// flattened outline serves every sub-pixel phase of a glyph without a copy.
+func rasterizeAt(polys [][]fpoint, dx float64) (image.Rectangle, *image.Alpha) {
 	if len(polys) == 0 {
 		return image.Rectangle{}, nil
 	}
@@ -131,11 +136,11 @@ func rasterize(polys [][]fpoint) (image.Rectangle, *image.Alpha) {
 	maxX, maxY := math.Inf(-1), math.Inf(-1)
 	for _, poly := range polys {
 		for _, p := range poly {
-			if p.x < minX {
-				minX = p.x
+			if p.x+dx < minX {
+				minX = p.x + dx
 			}
-			if p.x > maxX {
-				maxX = p.x
+			if p.x+dx > maxX {
+				maxX = p.x + dx
 			}
 			if p.y < minY {
 				minY = p.y
@@ -159,7 +164,7 @@ func rasterize(polys [][]fpoint) (image.Rectangle, *image.Alpha) {
 				for sx := 0; sx < supersample; sx++ {
 					fx := float64(x0+px) + (float64(sx)+0.5)/supersample
 					fy := float64(y0+py) + (float64(sy)+0.5)/supersample
-					if insideNonZero(polys, fx, fy) {
+					if insideNonZero(polys, fx-dx, fy) {
 						count++
 					}
 				}
