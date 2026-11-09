@@ -29,6 +29,8 @@ type Face struct {
 	size   float64
 	scale  float64
 	cache  map[GlyphIndex]cachedGlyph
+	// phased holds glyphs rasterised at a sub-pixel phase (see GlyphMaskIndexAt).
+	phased map[phasedKey]cachedGlyph
 
 	// varCoords, when non-nil, instances a variable font's glyf outlines at the
 	// given user-space axis coordinates before rasterising (see SetVariation).
@@ -208,8 +210,58 @@ func (fc *Face) glyph(gid GlyphIndex) cachedGlyph {
 	return cg
 }
 
+// phasedKey names one glyph at one horizontal sub-pixel phase.
+type phasedKey struct {
+	gid   GlyphIndex
+	phase int
+}
+
+// SubpixelPhases is the number of horizontal positions within a pixel that
+// [Face.GlyphMaskIndexAt] tells apart: a glyph origin is rounded to the nearest
+// 1/SubpixelPhases of a pixel, an error of at most 1/(2*SubpixelPhases) px.
+const SubpixelPhases = 4
+
+// GlyphMaskIndexAt is [Face.GlyphMaskIndex] with a FRACTIONAL pen position: the
+// glyph is rasterised with its origin at the nearest of [SubpixelPhases]
+// horizontal positions in the pixel, so a caller that keeps its pen in a unit
+// finer than the pixel (the exact advances [Face.AdvanceIndexUnits] times
+// [Face.Scale]) lays a line out as a browser does, instead of rounding every
+// advance to a whole pixel. Combined with [Font.NewFaceAt] the outlines are drawn
+// at the exact size as well.
+//
+// x is the pen origin on the baseline in pixels (fractional), y the baseline row.
+// bounds is the destination rectangle of mask, mask a coverage mask, advance the
+// glyph's own horizontal advance in pixels, UNROUNDED. ok is false when gid is
+// out of range or its outline is corrupt. A valid-but-empty glyph (a space)
+// returns ok true with a nil mask and its advance. Masks are cached per glyph
+// and phase and must not be modified.
+func (fc *Face) GlyphMaskIndexAt(gid GlyphIndex, x float64, y int) (bounds image.Rectangle, mask *image.Alpha, advance float64, ok bool) {
+	ix := int(math.Floor(x))
+	phase := int((x-float64(ix))*SubpixelPhases + 0.5)
+	if phase == SubpixelPhases {
+		ix++
+		phase = 0
+	}
+	key := phasedKey{gid, phase}
+	cg, hit := fc.phased[key]
+	if !hit {
+		cg = fc.renderAt(gid, float64(phase)/SubpixelPhases)
+		if fc.phased == nil {
+			fc.phased = map[phasedKey]cachedGlyph{}
+		}
+		fc.phased[key] = cg
+	}
+	if !cg.ok {
+		return image.Rectangle{}, nil, 0, false
+	}
+	return cg.bounds.Add(image.Point{X: ix, Y: y}), cg.mask, fc.hAdvanceUnits(gid) * fc.scale, true
+}
+
 // render decodes and rasterises glyph gid at the face's size.
-func (fc *Face) render(gid GlyphIndex) cachedGlyph {
+func (fc *Face) render(gid GlyphIndex) cachedGlyph { return fc.renderAt(gid, 0) }
+
+// renderAt is render with the outline shifted right by dx pixels.
+func (fc *Face) renderAt(gid GlyphIndex, dx float64) cachedGlyph {
 	contours, err := fc.outline(gid)
 	if err != nil {
 		return cachedGlyph{ok: false}
@@ -217,6 +269,9 @@ func (fc *Face) render(gid GlyphIndex) cachedGlyph {
 	polys := make([][]fpoint, 0, len(contours))
 	for _, c := range contours {
 		p := flattenContour(c, fc.scale)
+		for i := range p {
+			p[i].x += dx
+		}
 		if len(p) >= 3 {
 			polys = append(polys, p)
 		}
@@ -339,6 +394,7 @@ func (fc *Face) SetVariation(coords map[string]float64) {
 	fc.varCoords = coords
 	fc.varNorm = fc.font.NormalizeCoords(coords)
 	fc.cache = map[GlyphIndex]cachedGlyph{}
+	fc.phased = nil
 }
 
 // SetHinting enables or disables the TrueType instruction interpreter. When
@@ -349,6 +405,7 @@ func (fc *Face) SetVariation(coords map[string]float64) {
 func (fc *Face) SetHinting(on bool) {
 	fc.hinting = on
 	fc.cache = map[GlyphIndex]cachedGlyph{}
+	fc.phased = nil
 }
 
 // SetStemDarkening enables or disables stem darkening (weight compensation) for
@@ -362,6 +419,7 @@ func (fc *Face) SetHinting(on bool) {
 func (fc *Face) SetStemDarkening(on bool) {
 	fc.stemDarken = on
 	fc.cache = map[GlyphIndex]cachedGlyph{}
+	fc.phased = nil
 }
 
 // hintInterp lazily builds the interpreter for this face (running the font
