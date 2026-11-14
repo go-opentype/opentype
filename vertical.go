@@ -30,6 +30,8 @@ import "fmt"
 // independent, but vmtx is meaningful only alongside vhea (which supplies
 // numOfLongVerMetrics), so a vmtx without a vhea is ignored. A malformed table
 // that is present is reported as an error so a corrupt font fails cleanly.
+// Missing trailing vmtx bearings are replaced with zero; truncated full
+// metric pairs are still errors.
 func (f *Font) parseVertical(tables map[string][]byte) error {
 	if b, ok := tables["vhea"]; ok {
 		if err := f.parseVhea(b); err != nil {
@@ -71,10 +73,10 @@ func (f *Font) parseVhea(b []byte) error {
 // bearing slices, mirroring parseHmtx. The first numOfLongVerMetrics entries are
 // (advanceHeight, topSideBearing) pairs; the trailing glyphs share the last
 // entry's advance and carry their own top side bearing.
+// Some PDF subsets omit trailing bearings, which default to zero.
 func (f *Font) parseVmtx(b []byte) error {
 	n := f.numOfLongVerMetrics
-	need := 4*n + 2*(f.numGlyphs-n)
-	if len(b) < need {
+	if len(b) < 4*n {
 		return fmt.Errorf("opentype: vmtx table: %w", errTruncated)
 	}
 	f.vertAdvances = make([]int, f.numGlyphs)
@@ -87,7 +89,10 @@ func (f *Font) parseVmtx(b []byte) error {
 			f.tsbs[i] = int(sbe16(b[i*4+2:]))
 		} else {
 			f.vertAdvances[i] = lastAdvance
-			f.tsbs[i] = int(sbe16(b[4*n+2*(i-n):]))
+			off := 4*n + 2*(i-n)
+			if off+2 <= len(b) {
+				f.tsbs[i] = int(sbe16(b[off:]))
+			}
 		}
 	}
 	f.hasVmtx = true
