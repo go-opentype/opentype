@@ -162,9 +162,35 @@ func (fc *Face) Kern(prev, r rune) int {
 // would discard. A caller multiplies the result by Face.Scale to obtain pixels
 // (mirroring AdvanceIndexUnits). The adjustment is zero when the font carries no
 // kerning for the pair.
+// ⛔⛔ AND IT IS NOT AUTHORITATIVE FOR EVERY FONT. "The adjustment is zero when
+// the font carries no kerning for the pair" is true only of fonts whose kerning
+// is in pair-adjustment lookups. A font that kerns through GPOS type 7 or 8 also
+// gets a zero here, and the two are indistinguishable. Ask
+// KerningIsContextual once per face: when it is true, this answer is a floor and
+// the shaping path is the one with the sequence a contextual rule needs.
 func (fc *Face) KernIndexUnits(left, right GlyphIndex) float64 {
 	kn := Kerner{gpos: fc.font.gpos, kern: fc.font.kern}
 	return float64(kn.Kerning(left, right))
+}
+
+// KerningIsContextual reports whether a pair query — Kern, KernUnits,
+// KernIndexUnits, MeasureKerned — can speak for this font's kerning at all.
+//
+// It is false for the ordinary case: the font's `kern` feature is pair
+// adjustment, and the pair APIs answer it exactly. It is true when any kern
+// lookup is a contextual one (GPOS type 7 or 8), which a pair query cannot
+// evaluate because such a rule is matched against the glyphs AROUND a position.
+// Those pairs then come back 0 from the pair APIs and are adjusted by
+// ShapePositioned / ShapePositionedUnits, so the two disagree about the same
+// font.
+//
+// A text engine that steers by kerning should ask this once per face and either
+// drive the shaping path or record that its figures are a floor. Returning 0 and
+// saying nothing is how go-tex/engine#716's 1.12pt per "AV" stayed invisible to
+// every number that measurement steers by.
+func (fc *Face) KerningIsContextual() bool {
+	kn := Kerner{gpos: fc.font.gpos, kern: fc.font.kern}
+	return kn.KerningIsContextual()
 }
 
 // KernUnits returns the horizontal kerning adjustment between the consecutive
