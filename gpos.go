@@ -1659,12 +1659,69 @@ func (p *gpos) kernCovered(left, right GlyphIndex) (int, bool) {
 	return total, covered
 }
 
+// kernHasContextualLookups reports whether any lookup the `kern` feature selects
+// carries a subtable that a PAIR query cannot evaluate.
+//
+// ⛔⛔ THIS EXISTS BECAUSE kernCovered ABOVE SKIPS THOSE SUBTABLES SILENTLY. It
+// takes the pairPos ones and `continue`s past the rest, so a font whose kerning
+// lives in GPOS lookup type 7 (Contextual) or 8 (Chained Contextual) reports
+// `covered == false` and Kerning answers 0 — indistinguishable from a font that
+// says "nothing here", which is the one distinction the comment on Kerning is
+// careful to make for pairPos and cannot make for these.
+//
+// ⚠ AND IT IS NOT FIXABLE BY TEACHING kernCovered THOSE TYPES. contextPos1/2/3
+// expose `apply(ctx *posContext, i int)` and nothing else, because a contextual
+// rule is evaluated against the glyph sequence AROUND a position: the preceding
+// glyphs, the following ones, the backtrack and lookahead coverage. A caller
+// holding only (left, right) has none of that, so the question "what is the kern
+// between these two glyphs" HAS NO ANSWER for such a font. The shaping path
+// (ShapePositioned / ShapePositionedUnits) does have the sequence and does apply
+// them.
+//
+// So the honest API is not a better pair answer, it is a way for the caller to
+// learn that its question is the wrong one. "I could not evaluate this" must not
+// arrive as "the adjustment is zero": go-tex/engine#716 measured a kerning defect
+// of 1.12pt per "AV" that was invisible to every number it steers by, and the
+// consumer's text path calls KernUnits (go-tex/engine font.go:337), which is this
+// path.
+func (p *gpos) kernHasContextualLookups() bool {
+	for _, li := range p.selectLookupsDefault(map[string]bool{"kern": true}) {
+		if li >= len(p.lookups) {
+			continue
+		}
+		for _, st := range p.lookups[li].subtables {
+			if _, ok := st.(pairPos); !ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Kerner combines GPOS and the legacy kern table: GPOS is preferred and the
 // kern table is a fallback used when GPOS yields no adjustment. Either source
 // may be nil.
 type Kerner struct {
 	gpos *gpos
 	kern *kern
+}
+
+// KerningIsContextual reports whether this font puts any of its `kern` feature
+// in lookups a pair query cannot evaluate — GPOS types 7 and 8.
+//
+// When it is true, Kerning and the rune-keyed KernUnits are NOT authoritative for
+// this font: they answer from the pair-adjustment subtables alone and return 0
+// where a contextual rule would have adjusted. A caller that needs the font's
+// real positioning must drive the shaping path, which has the glyph sequence a
+// contextual rule is evaluated against.
+//
+// ⛔ It is a property of the FONT, not of a pair, and that is the point. The
+// condition cannot be reported per call — kernCovered genuinely does not know
+// whether the contextual lookup it skipped would have matched at some position —
+// so a caller asks once, per face, and decides which path to use. Asked per pair
+// it would have to answer "maybe" every time.
+func (kn *Kerner) KerningIsContextual() bool {
+	return kn.gpos != nil && kn.gpos.kernHasContextualLookups()
 }
 
 // Kerning returns the X-advance adjustment between left and right. GPOS wins
