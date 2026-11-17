@@ -12,12 +12,33 @@
 //
 // # Scope
 //
-// Phase 1 covers TrueType 'glyf' outlines: the sfnt container, the head,
-// maxp, hhea, hmtx, cmap (formats 4 and 12), loca and glyf tables, simple and
-// composite glyphs, implied on-curve points, and a non-zero-winding
-// supersampling rasteriser. OpenType/CFF ('OTTO') outlines, GPOS/GSUB
-// shaping, kerning and hinting are not implemented; see the README for the
-// full support matrix.
+// The sfnt container, head, maxp, hhea, hmtx, cmap (formats 4 and 12), loca
+// and glyf tables, simple and composite glyphs, implied on-curve points, and a
+// non-zero-winding supersampling rasteriser. Beyond that: CFF and CFF2
+// ('OTTO') Type 2 charstrings, variable fonts ('fvar'/'avar'/'gvar' and the
+// CFF2 blends), GSUB/GPOS/GDEF shaping with the legacy 'kern' table as a
+// fallback, and both hinters. See the README for the full support matrix, and
+// [Face.ShapePositionedUnits] for the shaped-run entry point.
+//
+// ⛔⛔ THIS PARAGRAPH USED TO SAY THE OPPOSITE, AND A CONSUMER BELIEVED IT. It
+// read "Phase 1 covers TrueType 'glyf' outlines … OpenType/CFF ('OTTO')
+// outlines, GPOS/GSUB shaping, kerning and hinting are not implemented" long
+// after each of those landed with its own tests — gsub.go, gpos.go, kern.go,
+// shape.go, hint.go, cff.go, cff2.go, cffhint.go. The README's matrix said
+// "done" at the same time, so the two halves of this repository's own
+// documentation disagreed, and the stale half is the one a consumer reads
+// first.
+//
+// What that cost, measured in go-tex/engine at its origin/main: the engine
+// calls Shape(text, "liga") for ligatures and then obtains kerning ONE RUNE
+// PAIR AT A TIME through KernUnits(prev, cur) — ShapePositioned and
+// ShapePositionedUnits are never called, so contextual GPOS, cursive
+// attachment and mark attachment are not missing there but UNASKED FOR. The
+// doc comment on ShapePositionedUnits describes that engine's predicament in
+// its own words; this paragraph is why it had no reason to look.
+//
+// doc_scope_test.go now fails if this paragraph calls a feature unimplemented
+// while the file implementing it is in the tree.
 //
 // The OpenType MATH table (math-typesetting metrics: constants, per-glyph
 // italic correction and kerning, and stretchy-glyph size variants and
