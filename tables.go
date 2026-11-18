@@ -75,10 +75,11 @@ func (f *Font) parseHhea(b []byte) error {
 // parseHmtx expands the hmtx table into per-glyph advanceWidth and left side
 // bearing slices. The first numberOfHMetrics entries are (advance, lsb) pairs;
 // the trailing glyphs share the last entry's advance and carry their own lsb.
+// Some PDF subsets omit trailing bearings. Recover only missing entries from
+// glyf xMin, leaving zero for empty glyphs or unavailable glyph headers.
 func (f *Font) parseHmtx(b []byte) error {
 	n := f.numberOfHMetrics
-	need := 4*n + 2*(f.numGlyphs-n)
-	if len(b) < need {
+	if len(b) < 4*n {
 		return fmt.Errorf("opentype: hmtx table: %w", errTruncated)
 	}
 	f.advances = make([]int, f.numGlyphs)
@@ -91,7 +92,18 @@ func (f *Font) parseHmtx(b []byte) error {
 			f.lsbs[i] = int(sbe16(b[i*4+2:]))
 		} else {
 			f.advances[i] = lastAdvance
-			f.lsbs[i] = int(sbe16(b[4*n+2*(i-n):]))
+			off := 4*n + 2*(i-n)
+			if off+2 <= len(b) {
+				f.lsbs[i] = int(sbe16(b[off:]))
+			} else if i+1 < len(f.loca) {
+				start, end := f.loca[i], f.loca[i+1]
+				if start < end && uint64(end) <= uint64(len(f.glyf)) && end-start >= 10 {
+					g := f.glyf[start:end]
+					if sbe16(g) != 0 {
+						f.lsbs[i] = int(sbe16(g[2:]))
+					}
+				}
+			}
 		}
 	}
 	return nil
