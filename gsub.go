@@ -95,7 +95,10 @@ type seqLookupRecord struct {
 // readU16s reads n consecutive big-endian uint16 values; a non-positive n
 // yields nil (used where a count field may underflow, e.g. inputCount-1).
 func readU16s(r *reader, n int) []uint16 {
-	if n <= 0 {
+	if n <= 0 || !r.has(uint64(n), 2) {
+		if n > 0 {
+			r.err = errTruncated // the count promises more than the table holds
+		}
 		return nil
 	}
 	out := make([]uint16, n)
@@ -107,7 +110,10 @@ func readU16s(r *reader, n int) []uint16 {
 
 // parseSeqLookupRecords reads n SequenceLookupRecords.
 func parseSeqLookupRecords(r *reader, n int) []seqLookupRecord {
-	if n <= 0 {
+	if n <= 0 || !r.has(uint64(n), 4) {
+		if n > 0 {
+			r.err = errTruncated
+		}
 		return nil
 	}
 	recs := make([]seqLookupRecord, n)
@@ -122,8 +128,11 @@ func parseSeqLookupRecords(r *reader, n int) []seqLookupRecord {
 // from the start of b) into a slice of glyph->coverage-index maps.
 func parseCoverageList(b []byte, offs []uint16) ([]map[GlyphIndex]int, error) {
 	out := make([]map[GlyphIndex]int, len(offs))
+	memo := map[int]map[GlyphIndex]int{}
 	for i, off := range offs {
-		cov, err := parseCoverage(subslice(b, int(off)))
+		cov, err := memoOnce(memo, int(off), func() (map[GlyphIndex]int, error) {
+			return parseCoverage(subslice(b, int(off)))
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -139,8 +148,11 @@ func parseGSUB(b []byte) (*gsub, error) {
 		return nil, err
 	}
 	lookups := make([]gsubLookup, len(raw))
+	// Lookups may share one table; every table ends where the LookupList does,
+	// so its length identifies its offset.
+	memo := map[int]gsubLookup{}
 	for i, lk := range raw {
-		gl, err := parseGSUBLookup(lk)
+		gl, err := memoOnce(memo, len(lk), func() (gsubLookup, error) { return parseGSUBLookup(lk) })
 		if err != nil {
 			return nil, err
 		}
@@ -156,6 +168,9 @@ func parseGSUBLookup(b []byte) (gsubLookup, error) {
 	lookupType := r.u16()
 	flag := r.u16()
 	subCount := int(r.u16())
+	if err := r.room("gsub lookup", "subTableCount", uint64(subCount), 2); err != nil {
+		return gsubLookup{}, err
+	}
 	offs := make([]int, subCount)
 	for i := 0; i < subCount; i++ {
 		offs[i] = int(r.u16())
@@ -168,8 +183,11 @@ func parseGSUBLookup(b []byte) (gsubLookup, error) {
 		return gsubLookup{}, fmt.Errorf("opentype: gsub lookup: %w", r.err)
 	}
 	var subs []gsubSubtable
+	memo := map[int]gsubSubtable{}
 	for _, off := range offs {
-		st, err := parseGSUBSubtable(lookupType, subslice(b, off))
+		st, err := memoOnce(memo, off, func() (gsubSubtable, error) {
+			return parseGSUBSubtable(lookupType, subslice(b, off))
+		})
 		if err != nil {
 			return gsubLookup{}, err
 		}
@@ -246,6 +264,9 @@ func parseGSUBSingle(b []byte) (gsubSubtable, error) {
 		return &gsubSingle1{cov: cov, delta: delta}, nil
 	case 2:
 		n := int(r.u16())
+		if err := r.room("single subst 2", "glyphCount", uint64(n), 2); err != nil {
+			return nil, err
+		}
 		subst := make([]GlyphIndex, n)
 		for i := 0; i < n; i++ {
 			subst[i] = GlyphIndex(r.u16())
@@ -294,6 +315,9 @@ type gsubMultiple1 struct {
 func parseSequenceTable(b []byte) ([]GlyphIndex, error) {
 	r := reader{b: b}
 	n := int(r.u16())
+	if err := r.room("sequence", "glyphCount", uint64(n), 2); err != nil {
+		return nil, err
+	}
 	out := make([]GlyphIndex, n)
 	for i := 0; i < n; i++ {
 		out[i] = GlyphIndex(r.u16())
@@ -322,8 +346,9 @@ func parseGSUBMultiple(b []byte) (gsubSubtable, error) {
 		return nil, err
 	}
 	seqs := make([][]GlyphIndex, n)
+	memo := map[int][]GlyphIndex{}
 	for i, off := range seqOffs {
-		s, err := parseSequenceTable(subslice(b, int(off)))
+		s, err := memoOnce(memo, int(off), func() ([]GlyphIndex, error) { return parseSequenceTable(subslice(b, int(off))) })
 		if err != nil {
 			return nil, err
 		}
@@ -374,8 +399,9 @@ func parseGSUBAlternate(b []byte) (gsubSubtable, error) {
 		return nil, err
 	}
 	sets := make([][]GlyphIndex, n)
+	memo := map[int][]GlyphIndex{}
 	for i, off := range setOffs {
-		s, err := parseSequenceTable(subslice(b, int(off)))
+		s, err := memoOnce(memo, int(off), func() ([]GlyphIndex, error) { return parseSequenceTable(subslice(b, int(off))) })
 		if err != nil {
 			return nil, err
 		}
@@ -419,6 +445,9 @@ func parseGSUBLigature(b []byte) (gsubSubtable, error) {
 	r.skip(2) // substFormat (always 1)
 	covOff := int(r.u16())
 	setCount := int(r.u16())
+	if err := r.room("ligature subst", "ligSetCount", uint64(setCount), 2); err != nil {
+		return nil, err
+	}
 	setOffs := make([]int, setCount)
 	for i := 0; i < setCount; i++ {
 		setOffs[i] = int(r.u16())
@@ -431,8 +460,9 @@ func parseGSUBLigature(b []byte) (gsubSubtable, error) {
 		return nil, err
 	}
 	sets := make([][]ligature, setCount)
+	memo := map[int][]ligature{}
 	for i, so := range setOffs {
-		ls, err := parseLigatureSet(subslice(b, so))
+		ls, err := memoOnce(memo, so, func() ([]ligature, error) { return parseLigatureSet(subslice(b, so)) })
 		if err != nil {
 			return nil, err
 		}
@@ -445,6 +475,9 @@ func parseGSUBLigature(b []byte) (gsubSubtable, error) {
 func parseLigatureSet(b []byte) ([]ligature, error) {
 	r := reader{b: b}
 	count := int(r.u16())
+	if err := r.room("ligatureSet", "ligatureCount", uint64(count), 2); err != nil {
+		return nil, err
+	}
 	offs := make([]int, count)
 	for i := 0; i < count; i++ {
 		offs[i] = int(r.u16())
@@ -453,8 +486,9 @@ func parseLigatureSet(b []byte) ([]ligature, error) {
 		return nil, fmt.Errorf("opentype: ligatureSet: %w", r.err)
 	}
 	ligs := make([]ligature, count)
+	memo := map[int]ligature{}
 	for i, off := range offs {
-		lg, err := parseLigature(subslice(b, off))
+		lg, err := memoOnce(memo, off, func() (ligature, error) { return parseLigature(subslice(b, off)) })
 		if err != nil {
 			return nil, err
 		}
@@ -469,6 +503,11 @@ func parseLigature(b []byte) (ligature, error) {
 	r := reader{b: b}
 	glyph := GlyphIndex(r.u16())
 	compCount := int(r.u16())
+	if compCount > 1 {
+		if err := r.room("ligature", "componentCount", uint64(compCount-1), 2); err != nil {
+			return ligature{}, err
+		}
+	}
 	rest := make([]GlyphIndex, 0, compCount)
 	for i := 1; i < compCount; i++ {
 		rest = append(rest, GlyphIndex(r.u16()))
@@ -669,8 +708,9 @@ func parseSeqRuleSet(b []byte) ([]seqRule, error) {
 		return nil, fmt.Errorf("opentype: seq rule set: %w", r.err)
 	}
 	rules := make([]seqRule, n)
+	memo := map[int]seqRule{}
 	for i, off := range offs {
-		ru, err := parseSeqRule(subslice(b, int(off)))
+		ru, err := memoOnce(memo, int(off), func() (seqRule, error) { return parseSeqRule(subslice(b, int(off))) })
 		if err != nil {
 			return nil, err
 		}
@@ -683,11 +723,12 @@ func parseSeqRuleSet(b []byte) ([]seqRule, error) {
 // offset denotes an absent (empty) set.
 func parseSeqRuleSets(b []byte, offs []uint16) ([][]seqRule, error) {
 	sets := make([][]seqRule, len(offs))
+	memo := map[int][]seqRule{}
 	for i, off := range offs {
 		if off == 0 {
 			continue
 		}
-		rs, err := parseSeqRuleSet(subslice(b, int(off)))
+		rs, err := memoOnce(memo, int(off), func() ([]seqRule, error) { return parseSeqRuleSet(subslice(b, int(off))) })
 		if err != nil {
 			return nil, err
 		}
@@ -856,8 +897,9 @@ func parseChainRuleSet(b []byte) ([]chainRule, error) {
 		return nil, fmt.Errorf("opentype: chain rule set: %w", r.err)
 	}
 	rules := make([]chainRule, n)
+	memo := map[int]chainRule{}
 	for i, off := range offs {
-		ru, err := parseChainRule(subslice(b, int(off)))
+		ru, err := memoOnce(memo, int(off), func() (chainRule, error) { return parseChainRule(subslice(b, int(off))) })
 		if err != nil {
 			return nil, err
 		}
@@ -870,16 +912,18 @@ func parseChainRuleSet(b []byte) ([]chainRule, error) {
 // offset denotes an absent (empty) set.
 func parseChainRuleSets(b []byte, offs []uint16) ([][]chainRule, error) {
 	sets := make([][]chainRule, len(offs))
+	memo := map[int][]chainRule{}
 	for i, off := range offs {
 		if off == 0 {
 			continue
 		}
-		rs, err := parseChainRuleSet(subslice(b, int(off)))
+		rs, err := memoOnce(memo, int(off), func() ([]chainRule, error) { return parseChainRuleSet(subslice(b, int(off))) })
 		if err != nil {
 			return nil, err
 		}
 		sets[i] = rs
 	}
+
 	return sets, nil
 }
 

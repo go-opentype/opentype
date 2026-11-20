@@ -103,7 +103,22 @@ func (f *Font) parseFvar(b []byte) error {
 		return fmt.Errorf("opentype: fvar table: %w", r.err)
 	}
 
+	// Each axis and instance record must lie in the table: counts and record
+	// sizes are the font's own, and a size of zero makes every record read the
+	// same bytes, so 65535 x 65535 coordinates would come from a few bytes.
+	ar0 := reader{b: b, pos: axesOffset}
+	if err := ar0.room("fvar", "axisCount", uint64(axisCount), max(axisSize, 1)); err != nil {
+		return err
+	}
+	ir0 := reader{b: b, pos: axesOffset + axisCount*axisSize}
+	if err := ir0.room("fvar", "instanceCount", uint64(instanceCount), max(instanceSize, 1)); err != nil {
+		return err
+	}
+	if err := f.budget(len(b)).spend("fvar", "instanceCount x axisCount", uint64(instanceCount)*uint64(axisCount), mapEntryCost); err != nil {
+		return err
+	}
 	axes := make([]Axis, axisCount)
+
 	for i := range axes {
 		ar := reader{b: b, pos: axesOffset + i*axisSize}
 		tag := readTag(&ar)

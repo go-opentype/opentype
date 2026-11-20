@@ -67,6 +67,13 @@ func (f *Font) parseGvar(b []byte) error {
 	}
 
 	longOffsets := flags&1 != 0
+	offSize := 2
+	if longOffsets {
+		offSize = 4
+	}
+	if err := r.room("gvar", "glyphCount", uint64(glyphCount)+1, offSize); err != nil {
+		return err
+	}
 	offsets := make([]uint32, glyphCount+1)
 	for i := range offsets {
 		if longOffsets {
@@ -75,21 +82,21 @@ func (f *Font) parseGvar(b []byte) error {
 			offsets[i] = uint32(r.u16()) * 2
 		}
 	}
-	if r.err != nil {
-		return fmt.Errorf("opentype: gvar offsets: %w", r.err)
-	}
 
-	shared := make([][]float64, sharedTupleCount)
 	sr := reader{b: b, pos: sharedTuplesOffset}
+	// sharedTupleCount x axisCount are two 16-bit counts: 32 GiB of float64 from
+	// a header, if nothing checks that the tuples are in the table.
+	if err := sr.room("gvar", "sharedTupleCount x axisCount", uint64(sharedTupleCount)*uint64(max(axisCount, 1)), 2); err != nil {
+		return err
+	}
+	shared := make([][]float64, sharedTupleCount)
+
 	for i := range shared {
 		t := make([]float64, axisCount)
 		for a := range t {
 			t[a] = sr.f2dot14()
 		}
 		shared[i] = t
-	}
-	if sr.err != nil {
-		return fmt.Errorf("opentype: gvar shared tuples: %w", sr.err)
 	}
 
 	f.gvar = &gvarTable{

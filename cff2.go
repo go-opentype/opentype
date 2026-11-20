@@ -80,23 +80,27 @@ type itemVarStore struct {
 // count) at r's current position, returning each stored object as a sub-slice of
 // r.b and leaving r positioned just past the INDEX.
 func parseIndex2(r *reader) ([][]byte, error) {
-	count := int(r.u32())
+	count32 := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cff2 index count: %w", r.err)
 	}
-	if count == 0 {
+	if count32 == 0 {
 		return nil, nil
 	}
 	offSize := int(r.u8())
 	if offSize < 1 || offSize > 4 {
 		return nil, fmt.Errorf("opentype: cff2 index: bad offSize %d", offSize)
 	}
+	// count+1 offsets of offSize bytes each must be present. Checked in 64 bits
+	// and by division: count32+1 would wrap to 0 in a uint32, and int(count32)
+	// is negative on a 32-bit build.
+	if err := r.room("cff2 index", "count", uint64(count32)+1, offSize); err != nil {
+		return nil, err
+	}
+	count := int(count32)
 	offsets := make([]int, count+1)
 	for k := range offsets {
 		offsets[k] = readOffset(r, offSize)
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cff2 index offsets: %w", r.err)
 	}
 	base := r.pos - offsets[0]
 	items := make([][]byte, count)

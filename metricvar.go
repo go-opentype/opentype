@@ -84,6 +84,9 @@ func parseMetricVarStore(b []byte, off int) (*metricVarStore, error) {
 	}
 	regionListOff := off + int(r.u32())
 	ivdCount := int(r.u16())
+	if err := r.room("ItemVariationStore", "itemVariationDataCount", uint64(ivdCount), 4); err != nil {
+		return nil, err
+	}
 	ivdOffsets := make([]int, ivdCount)
 	for i := range ivdOffsets {
 		ivdOffsets[i] = off + int(r.u32())
@@ -95,6 +98,9 @@ func parseMetricVarStore(b []byte, off int) (*metricVarStore, error) {
 	rr := reader{b: b, pos: regionListOff}
 	axisCount := int(rr.u16())
 	regionCount := int(rr.u16())
+	if err := rr.room("ItemVariationStore", "regionCount x axisCount", uint64(regionCount)*uint64(max(axisCount, 1)), 6); err != nil {
+		return nil, err
+	}
 	lower := make([][]float64, regionCount)
 	peak := make([][]float64, regionCount)
 	upper := make([][]float64, regionCount)
@@ -114,8 +120,9 @@ func parseMetricVarStore(b []byte, off int) (*metricVarStore, error) {
 	}
 
 	data := make([]metricVarData, ivdCount)
+	memo := map[int]metricVarData{} // offsets may all name one subtable
 	for i, o := range ivdOffsets {
-		d, err := parseItemVarData(b, o, regionCount)
+		d, err := memoOnce(memo, o, func() (metricVarData, error) { return parseItemVarData(b, o, regionCount) })
 		if err != nil {
 			return nil, err
 		}
@@ -133,6 +140,9 @@ func parseItemVarData(b []byte, off, regionCount int) (metricVarData, error) {
 	itemCount := int(r.u16())
 	wordDeltaCount := int(r.u16())
 	regionIndexCount := int(r.u16())
+	if err := r.room("ItemVariationData", "regionIndexCount", uint64(regionIndexCount), 2); err != nil {
+		return metricVarData{}, err
+	}
 	idx := make([]int, regionIndexCount)
 	for k := range idx {
 		ri := int(r.u16())
@@ -149,6 +159,10 @@ func parseItemVarData(b []byte, off, regionCount int) (metricVarData, error) {
 	wordCount := wordDeltaCount & 0x7FFF
 	if wordCount > regionIndexCount {
 		return metricVarData{}, fmt.Errorf("opentype: ItemVariationData: word count %d exceeds region count %d", wordCount, regionIndexCount)
+	}
+	// itemCount rows of regionIndexCount deltas of at least one byte each.
+	if err := r.room("ItemVariationData", "itemCount x regionIndexCount", uint64(itemCount)*uint64(regionIndexCount), 1); err != nil {
+		return metricVarData{}, err
 	}
 	sets := make([][]int32, itemCount)
 	for i := 0; i < itemCount; i++ {
@@ -222,7 +236,11 @@ func parseDeltaSetMap(b []byte, off int) (*deltaSetMap, error) {
 	entrySize := int((entryFormat&0x30)>>4) + 1
 	innerMask := uint32(1)<<innerBits - 1
 
+	if err := r.room("DeltaSetIndexMap", "mapCount", uint64(count), entrySize); err != nil {
+		return nil, err
+	}
 	m := &deltaSetMap{outer: make([]uint32, count), inner: make([]uint32, count)}
+
 	for i := 0; i < count; i++ {
 		var entry uint32
 		for k := 0; k < entrySize; k++ {
