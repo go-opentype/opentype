@@ -149,13 +149,13 @@ var errGlyphBudget = errors.New("glyph exceeds its per-glyph point budget")
 // a structural fault (bad loca, cycle, nesting, truncation) costs zero here and
 // is reported by the expansion that follows, with its own message.
 func (f *Font) checkGlyphBudget(root GlyphIndex) error {
-	_, err := f.glyphCost(root, root, 0, map[GlyphIndex]bool{}, map[GlyphIndex]int{})
+	_, err := f.glyphCost(root, root, 0, map[GlyphIndex]int{})
 	return err
 }
 
 // glyphCost is the point count of glyph gid, memoized per glyph ID so that a
 // glyph referenced many times is counted once.
-func (f *Font) glyphCost(root, gid GlyphIndex, depth int, visited map[GlyphIndex]bool, memo map[GlyphIndex]int) (int, error) {
+func (f *Font) glyphCost(root, gid GlyphIndex, depth int, memo map[GlyphIndex]int) (int, error) {
 	if c, ok := memo[gid]; ok {
 		return c, nil
 	}
@@ -165,9 +165,8 @@ func (f *Font) glyphCost(root, gid GlyphIndex, depth int, visited map[GlyphIndex
 	if int(gid) >= f.numGlyphs {
 		return 0, nil // loadGlyph reports the index
 	}
-	if visited[gid] {
-		return 0, nil // loadGlyph reports the cycle
-	}
+	// A cycle needs no guard of its own: the depth limit ends it, memoization
+	// keeps the walk linear, and loadGlyph reports it.
 	start, end := f.loca[gid], f.loca[gid+1]
 	if start > end || int(end) > len(f.glyf) {
 		return 0, nil // loadGlyph reports the loca
@@ -186,15 +185,13 @@ func (f *Font) glyphCost(root, gid GlyphIndex, depth int, visited map[GlyphIndex
 		if err != nil {
 			return 0, nil
 		}
-		visited[gid] = true
 		for _, comp := range comps {
-			sub, err := f.glyphCost(root, comp.gid, depth+1, visited, memo)
+			sub, err := f.glyphCost(root, comp.gid, depth+1, memo)
 			if err != nil {
 				return 0, err
 			}
 			cost += sub
 		}
-		delete(visited, gid)
 	}
 	if cost > maxGlyphPoints {
 		return 0, fmt.Errorf("opentype: glyph %d: %w: more than %d points", int(root), errGlyphBudget, maxGlyphPoints)
