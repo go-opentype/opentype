@@ -329,13 +329,13 @@ func parseMarkArray(b []byte) ([]markRecord, error) {
 
 // singlePos1 applies one ValueRecord to every covered glyph.
 type singlePos1 struct {
-	cov map[GlyphIndex]int
+	cov *glyphMap
 	val valueRecord
 }
 
 // singlePos2 applies a per-glyph ValueRecord indexed by coverage index.
 type singlePos2 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	vals []valueRecord
 }
 
@@ -376,7 +376,7 @@ func parseSinglePos(b []byte) (posSubtable, error) {
 }
 
 func (s *singlePos1) apply(ctx *posContext, i int) bool {
-	if _, ok := s.cov[ctx.glyphs[i]]; !ok {
+	if _, ok := s.cov.get(ctx.glyphs[i]); !ok {
 		return false
 	}
 	ctx.positions[i].addValue(s.val)
@@ -384,7 +384,7 @@ func (s *singlePos1) apply(ctx *posContext, i int) bool {
 }
 
 func (s *singlePos2) apply(ctx *posContext, i int) bool {
-	ci, ok := s.cov[ctx.glyphs[i]]
+	ci, ok := s.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -414,7 +414,7 @@ func parsePairPosAny(b []byte) (posSubtable, error) {
 // pairPos1 is a pair-adjustment format 1 subtable: covered first glyphs index
 // into per-glyph maps from second glyph to X-advance adjustment.
 type pairPos1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets []map[GlyphIndex]int
 }
 
@@ -475,7 +475,7 @@ func parsePairSet(b []byte, vf1, vf2 uint16) (map[GlyphIndex]int, error) {
 }
 
 func (p *pairPos1) kern(left, right GlyphIndex) (int, bool) {
-	ci, ok := p.cov[left]
+	ci, ok := p.cov.get(left)
 	if !ok {
 		return 0, false
 	}
@@ -502,8 +502,8 @@ func (p *pairPos1) apply(ctx *posContext, i int) bool {
 // covered, then both glyphs are classified and the class pair indexes a grid of
 // X-advance adjustments.
 type pairPos2 struct {
-	cov         map[GlyphIndex]int
-	cd1, cd2    map[GlyphIndex]int
+	cov         *glyphMap
+	cd1, cd2    *glyphMap
 	class2Count int
 	grid        []int
 }
@@ -556,10 +556,10 @@ func parsePairPos2(b []byte) (pairPos, error) {
 }
 
 func (p *pairPos2) kern(left, right GlyphIndex) (int, bool) {
-	if _, ok := p.cov[left]; !ok {
+	if _, ok := p.cov.get(left); !ok {
 		return 0, false
 	}
-	idx := p.cd1[left]*p.class2Count + p.cd2[right]
+	idx := p.cd1.class(left)*p.class2Count + p.cd2.class(right)
 	if idx >= len(p.grid) {
 		return 0, false
 	}
@@ -585,7 +585,7 @@ func (p *pairPos2) apply(ctx *posContext, i int) bool {
 // next glyph's entry anchor. entry[i] and exit[i] are indexed by coverage index
 // and may be nil (NULL anchor).
 type cursivePos struct {
-	cov   map[GlyphIndex]int
+	cov   *glyphMap
 	entry []*anchor
 	exit  []*anchor
 }
@@ -626,7 +626,7 @@ func parseCursivePos(b []byte) (posSubtable, error) {
 }
 
 func (c *cursivePos) apply(ctx *posContext, i int) bool {
-	ci, ok := c.cov[ctx.glyphs[i]]
+	ci, ok := c.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -634,7 +634,7 @@ func (c *cursivePos) apply(ctx *posContext, i int) bool {
 	if j >= len(ctx.glyphs) {
 		return false
 	}
-	ni, ok := c.cov[ctx.glyphs[j]]
+	ni, ok := c.cov.get(ctx.glyphs[j])
 	if !ok {
 		return false
 	}
@@ -679,8 +679,8 @@ func (ctx *posContext) attachMark(base, mark int, baseAnchor, markAnchor anchor)
 // markBasePos is a mark-to-base (type 4) subtable: base[baseIndex][markClass]
 // gives the base attachment anchor for each mark class.
 type markBasePos struct {
-	markCov map[GlyphIndex]int
-	baseCov map[GlyphIndex]int
+	markCov *glyphMap
+	baseCov *glyphMap
 	marks   []markRecord
 	base    [][]*anchor
 }
@@ -717,7 +717,7 @@ func parseMarkBasePos(b []byte) (posSubtable, error) {
 }
 
 func (m *markBasePos) apply(ctx *posContext, i int) bool {
-	mi, ok := m.markCov[ctx.glyphs[i]]
+	mi, ok := m.markCov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -731,7 +731,7 @@ func (m *markBasePos) apply(ctx *posContext, i int) bool {
 		if ctx.skip.skip(ctx.glyphs[b]) || ctx.skip.isMark(ctx.glyphs[b]) {
 			continue
 		}
-		bi, ok := m.baseCov[ctx.glyphs[b]]
+		bi, ok := m.baseCov.get(ctx.glyphs[b])
 		if !ok {
 			continue
 		}
@@ -753,8 +753,8 @@ func (m *markBasePos) apply(ctx *posContext, i int) bool {
 // GSUB ligature-component tracking the caller does not provide) is simplified
 // to the first component.
 type markLigPos struct {
-	markCov map[GlyphIndex]int
-	ligCov  map[GlyphIndex]int
+	markCov *glyphMap
+	ligCov  *glyphMap
 	marks   []markRecord
 	ligs    [][][]*anchor
 }
@@ -818,7 +818,7 @@ func parseLigatureArray(b []byte, cols int) ([][][]*anchor, error) {
 }
 
 func (m *markLigPos) apply(ctx *posContext, i int) bool {
-	mi, ok := m.markCov[ctx.glyphs[i]]
+	mi, ok := m.markCov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -831,7 +831,7 @@ func (m *markLigPos) apply(ctx *posContext, i int) bool {
 		if ctx.skip.skip(ctx.glyphs[b]) || ctx.skip.isMark(ctx.glyphs[b]) {
 			continue
 		}
-		li, ok := m.ligCov[ctx.glyphs[b]]
+		li, ok := m.ligCov.get(ctx.glyphs[b])
 		if !ok {
 			continue
 		}
@@ -855,8 +855,8 @@ func (m *markLigPos) apply(ctx *posContext, i int) bool {
 // markMarkPos is a mark-to-mark (type 6) subtable: mark2[mark2Index][markClass]
 // gives the base-mark attachment anchor.
 type markMarkPos struct {
-	mark1Cov map[GlyphIndex]int
-	mark2Cov map[GlyphIndex]int
+	mark1Cov *glyphMap
+	mark2Cov *glyphMap
 	marks    []markRecord
 	mark2    [][]*anchor
 }
@@ -893,7 +893,7 @@ func parseMarkMarkPos(b []byte) (posSubtable, error) {
 }
 
 func (m *markMarkPos) apply(ctx *posContext, i int) bool {
-	mi, ok := m.mark1Cov[ctx.glyphs[i]]
+	mi, ok := m.mark1Cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -907,7 +907,7 @@ func (m *markMarkPos) apply(ctx *posContext, i int) bool {
 		if ctx.skip.skip(ctx.glyphs[b]) {
 			continue
 		}
-		bi, ok := m.mark2Cov[ctx.glyphs[b]]
+		bi, ok := m.mark2Cov.get(ctx.glyphs[b])
 		if !ok {
 			continue
 		}
@@ -961,7 +961,7 @@ func glyphPredsG(seq []GlyphIndex) []glyphPred {
 // classPredsG builds class-equality predicates from a GlyphIndex class sequence
 // (stored with the on-disk class values of a Pos(Chain)ClassRule) and a
 // ClassDef map; glyphs absent from cd fall in class 0.
-func classPredsG(seq []GlyphIndex, cd map[GlyphIndex]int) []glyphPred {
+func classPredsG(seq []GlyphIndex, cd *glyphMap) []glyphPred {
 	preds := make([]glyphPred, len(seq))
 	for k := range seq {
 		v := int(seq[k])
@@ -979,7 +979,7 @@ type posRule struct {
 
 // contextPos1 is a contextual positioning format 1 subtable.
 type contextPos1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]posRule
 }
 
@@ -988,15 +988,15 @@ type contextPos1 struct {
 // sets is indexed by the first glyph's class; a nil set is empty (a NULL
 // PosClassSet offset, common for class 0).
 type contextPos2 struct {
-	cov      map[GlyphIndex]int
-	classDef map[GlyphIndex]int
+	cov      *glyphMap
+	classDef *glyphMap
 	sets     [][]posRule
 }
 
 // contextPos3 is a contextual positioning format 3 subtable: a per-position
 // coverage sequence and the lookup records to run on a full match.
 type contextPos3 struct {
-	covs []map[GlyphIndex]int
+	covs []*glyphMap
 	recs []posLookupRecord
 }
 
@@ -1060,7 +1060,7 @@ func parseContextPos2(b []byte) (posSubtable, error) {
 }
 
 func (c *contextPos2) apply(ctx *posContext, i int) bool {
-	if _, ok := c.cov[ctx.glyphs[i]]; !ok {
+	if _, ok := c.cov.get(ctx.glyphs[i]); !ok {
 		return false
 	}
 	cls := classOf(c.classDef, ctx.glyphs[i])
@@ -1153,7 +1153,7 @@ func parsePosRule(b []byte) (posRule, error) {
 }
 
 func (c *contextPos1) apply(ctx *posContext, i int) bool {
-	ci, ok := c.cov[ctx.glyphs[i]]
+	ci, ok := c.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -1206,8 +1206,8 @@ func (c *contextPos3) apply(ctx *posContext, i int) bool {
 
 // parsePosCoverageList decodes a slice of Coverage tables at the given offsets from
 // the start of b.
-func parsePosCoverageList(b []byte, offs []int) ([]map[GlyphIndex]int, error) {
-	covs := make([]map[GlyphIndex]int, len(offs))
+func parsePosCoverageList(b []byte, offs []int) ([]*glyphMap, error) {
+	covs := make([]*glyphMap, len(offs))
 	for i, off := range offs {
 		cov, err := parseCoverage(subslice(b, off))
 		if err != nil {
@@ -1228,7 +1228,7 @@ type posChainRule struct {
 
 // chainPos1 is a chaining contextual positioning format 1 subtable.
 type chainPos1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]posChainRule
 }
 
@@ -1237,18 +1237,18 @@ type chainPos1 struct {
 // rules match by class sequence. sets is indexed by the first glyph's input
 // class; a nil set is empty (a NULL ChainPosClassSet offset).
 type chainPos2 struct {
-	cov       map[GlyphIndex]int
-	backtrack map[GlyphIndex]int
-	input     map[GlyphIndex]int
-	lookahead map[GlyphIndex]int
+	cov       *glyphMap
+	backtrack *glyphMap
+	input     *glyphMap
+	lookahead *glyphMap
 	sets      [][]posChainRule
 }
 
 // chainPos3 is a chaining contextual positioning format 3 subtable.
 type chainPos3 struct {
-	back  []map[GlyphIndex]int
-	input []map[GlyphIndex]int
-	ahead []map[GlyphIndex]int
+	back  []*glyphMap
+	input []*glyphMap
+	ahead []*glyphMap
 	recs  []posLookupRecord
 }
 
@@ -1322,7 +1322,7 @@ func parseChainPos2(b []byte) (posSubtable, error) {
 }
 
 func (c *chainPos2) apply(ctx *posContext, i int) bool {
-	if _, ok := c.cov[ctx.glyphs[i]]; !ok {
+	if _, ok := c.cov.get(ctx.glyphs[i]); !ok {
 		return false
 	}
 	cls := classOf(c.input, ctx.glyphs[i])
@@ -1429,7 +1429,7 @@ func parsePosChainRule(b []byte) (posChainRule, error) {
 }
 
 func (c *chainPos1) apply(ctx *posContext, i int) bool {
-	ci, ok := c.cov[ctx.glyphs[i]]
+	ci, ok := c.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}

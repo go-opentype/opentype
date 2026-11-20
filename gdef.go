@@ -47,9 +47,9 @@ const (
 // absent subtable yields an empty map or nil slice); a font may carry a GDEF
 // table with only some of them present.
 type gdefTable struct {
-	glyphClass    map[GlyphIndex]int   // GlyphClassDef: base/ligature/mark/component
-	markAttach    map[GlyphIndex]int   // MarkAttachClassDef: mark-attachment class per mark
-	markGlyphSets []map[GlyphIndex]int // MarkGlyphSets: one Coverage per set
+	glyphClass    *glyphMap   // GlyphClassDef: base/ligature/mark/component
+	markAttach    *glyphMap   // MarkAttachClassDef: mark-attachment class per mark
+	markGlyphSets []*glyphMap // MarkGlyphSets: one Coverage per set
 }
 
 // parseGDEF decodes a GDEF table. AttachList and LigCaretList are tolerated but
@@ -71,7 +71,7 @@ func parseGDEF(b []byte) (*gdefTable, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: gdef header: %w", r.err)
 	}
-	t := &gdefTable{glyphClass: map[GlyphIndex]int{}, markAttach: map[GlyphIndex]int{}}
+	t := &gdefTable{}
 	if glyphClassOff != 0 {
 		cd, err := parseClassDef(subslice(b, glyphClassOff))
 		if err != nil {
@@ -98,7 +98,7 @@ func parseGDEF(b []byte) (*gdefTable, error) {
 
 // parseMarkGlyphSets decodes a MarkGlyphSetsDef table: a format, a set count and
 // that many Offset32 to Coverage tables (from the start of b).
-func parseMarkGlyphSets(b []byte) ([]map[GlyphIndex]int, error) {
+func parseMarkGlyphSets(b []byte) ([]*glyphMap, error) {
 	r := reader{b: b}
 	r.skip(2) // format (1)
 	n := int(r.u16())
@@ -109,7 +109,7 @@ func parseMarkGlyphSets(b []byte) ([]map[GlyphIndex]int, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: markGlyphSets: %w", r.err)
 	}
-	sets := make([]map[GlyphIndex]int, n)
+	sets := make([]*glyphMap, n)
 	for i, off := range offs {
 		cov, err := parseCoverage(subslice(b, off))
 		if err != nil {
@@ -125,8 +125,7 @@ func (t *gdefTable) markSetCovers(i int, g GlyphIndex) bool {
 	if i < 0 || i >= len(t.markGlyphSets) {
 		return false
 	}
-	_, ok := t.markGlyphSets[i][g]
-	return ok
+	return t.markGlyphSets[i].has(g)
 }
 
 // skipper decides which glyphs a lookup ignores while matching, from the
@@ -146,7 +145,7 @@ func (sk skipper) rtl() bool { return sk.flag&flagRightToLeft != 0 }
 // isMark reports whether g is a GDEF mark glyph (class 3). It is false without a
 // GDEF table, so mark-aware base finding degrades to the plain search.
 func (sk skipper) isMark(g GlyphIndex) bool {
-	return sk.gdef != nil && sk.gdef.glyphClass[g] == gdefClassMark
+	return sk.gdef != nil && sk.gdef.glyphClass.class(g) == gdefClassMark
 }
 
 // skip reports whether glyph g is ignored by this lookup: a base/ligature/mark
@@ -156,7 +155,7 @@ func (sk skipper) skip(g GlyphIndex) bool {
 	if sk.gdef == nil {
 		return false
 	}
-	class := sk.gdef.glyphClass[g]
+	class := sk.gdef.glyphClass.class(g)
 	if sk.flag&flagIgnoreBaseGlyphs != 0 && class == gdefClassBase {
 		return true
 	}
@@ -171,7 +170,7 @@ func (sk skipper) skip(g GlyphIndex) bool {
 			return !sk.gdef.markSetCovers(int(sk.markFilterSet), g)
 		}
 		if attach := sk.flag & flagMarkAttachTypeMask; attach != 0 {
-			return sk.gdef.markAttach[g] != int(attach>>8)
+			return sk.gdef.markAttach.class(g) != int(attach>>8)
 		}
 	}
 	return false
@@ -238,11 +237,11 @@ func (sk skipper) matchBackward(g []GlyphIndex, from int, preds []glyphPred) boo
 // positions after i. It returns the matched absolute positions (starting with
 // i), the index just past the input and whether it matched. An empty covs list
 // does not match.
-func (sk skipper) matchContext(g []GlyphIndex, i int, covs []map[GlyphIndex]int) (pos []int, end int, ok bool) {
+func (sk skipper) matchContext(g []GlyphIndex, i int, covs []*glyphMap) (pos []int, end int, ok bool) {
 	if len(covs) == 0 {
 		return nil, 0, false
 	}
-	if _, ok := covs[0][g[i]]; !ok {
+	if !covs[0].has(g[i]) {
 		return nil, 0, false
 	}
 	rest, end, ok := sk.matchForward(g, i+1, covPreds(covs[1:]))
@@ -253,11 +252,11 @@ func (sk skipper) matchContext(g []GlyphIndex, i int, covs []map[GlyphIndex]int)
 }
 
 // covPreds builds coverage-membership predicates from a list of Coverage maps.
-func covPreds(covs []map[GlyphIndex]int) []glyphPred {
+func covPreds(covs []*glyphMap) []glyphPred {
 	preds := make([]glyphPred, len(covs))
 	for k := range covs {
 		c := covs[k]
-		preds[k] = func(g GlyphIndex) bool { _, ok := c[g]; return ok }
+		preds[k] = c.has
 	}
 	return preds
 }

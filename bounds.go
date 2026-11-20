@@ -19,11 +19,23 @@ import (
 //     allocation by the length of the table it sits in.
 //
 //  2. A single allocation bounded by the file is still not a bound on the
-//     total: a thousand offsets may point at one table, two 16-bit counts may
-//     multiply, and a coverage range may cover 65536 glyphs in six bytes. So
-//     one [allocBudget] per Parse counts every element the tables allocate,
-//     each time a shared sub-table is decoded again, and refuses past the
-//     budget.
+//     total: a thousand offsets may point at one table, and two 16-bit counts
+//     may multiply. So one [allocBudget] per Parse counts the elements the cmap
+//     and fvar decoders allocate, each time a shared sub-table is decoded again,
+//     and refuses past the budget. The other decoders are bounded by
+//     construction, not by the budget, and charge nothing (see 3).
+//
+//  3. A coverage or class range may cover 65536 glyphs in six bytes. Coverage
+//     and ClassDef tables are therefore never expanded into one entry per
+//     glyph: a [glyphMap] searches the RangeRecords where they lie in the font,
+//     as HarfBuzz does, and allocates nothing for a table in spec order. A table
+//     that is not (unsorted or overlapping records) is normalised into at most
+//     two segments per record, so memory and work are proportional to the bytes
+//     read. A thousand lookups pointing at a thousand tables, or at one, hold
+//     slices of the font. The MATH decoders keep a coverage joined to its
+//     values instead of iterating it. Not charged either: the pair-set maps of
+//     PairPos format 1 and the segments of a normalised (out-of-spec) table,
+//     each proportional to the bytes of its own table.
 
 // errDeclaredCount is the refusal of a count that promises more elements than
 // the bytes present can hold. It wraps errTruncated: the table is short of the

@@ -595,3 +595,43 @@ func TestRealMathFontSTIX(t *testing.T) {
 		t.Error("'(' assembly has no extender part")
 	}
 }
+
+// TestMathUnitsVariants covers the unrounded queries, which share their lookups
+// with the rounded ones: the same glyph answers, the same glyph is absent.
+func TestMathUnitsVariants(t *testing.T) {
+	fc := fontWithMATH(t, populatedMATH()).NewFace(1000)
+	if got, want := fc.ItalicCorrectionUnits(0), float64(fc.ItalicCorrection(0)); got != want && (got-want > 1 || want-got > 1) {
+		t.Errorf("ItalicCorrectionUnits(0) = %v, rounded %v", got, want)
+	}
+	if got := fc.ItalicCorrectionUnits(99); got != 0 {
+		t.Errorf("ItalicCorrectionUnits(uncovered) = %v", got)
+	}
+	if v, ok := fc.TopAccentAttachmentUnits(0); !ok || v == 0 {
+		t.Errorf("TopAccentAttachmentUnits(0) = %v,%v", v, ok)
+	}
+	if _, ok := fc.TopAccentAttachmentUnits(99); ok {
+		t.Error("TopAccentAttachmentUnits(uncovered) ok = true")
+	}
+	if got := fc.MathKernUnits(0, MathKernTopRight, 150); got == 0 {
+		t.Error("MathKernUnits(TopRight) = 0")
+	}
+	if got := fc.MathKernUnits(0, MathKernTopLeft, 100); got != 0 {
+		t.Errorf("MathKernUnits(absent corner) = %v", got)
+	}
+	if got := fc.MathKernUnits(99, MathKernTopRight, 100); got != 0 {
+		t.Errorf("MathKernUnits(uncovered) = %v", got)
+	}
+	if got := fc.MathKernUnits(0, MathKernCorner(9), 100); got != 0 {
+		t.Errorf("MathKernUnits(bad corner) = %v", got)
+	}
+	none := fontWithMATH(t, nil).NewFace(1000)
+	if none.ItalicCorrectionUnits(0) != 0 || none.MathKernUnits(0, MathKernTopRight, 1) != 0 {
+		t.Error("no-MATH Units queries must be 0")
+	}
+	if _, ok := none.TopAccentAttachmentUnits(0); ok {
+		t.Error("no-MATH TopAccentAttachmentUnits ok = true")
+	}
+	if got := none.MathConstantUnits(AxisHeight); got != 0 {
+		t.Errorf("no-MATH MathConstantUnits = %v", got)
+	}
+}

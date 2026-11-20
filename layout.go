@@ -282,69 +282,6 @@ func parseLookupList(b []byte) ([][]byte, error) {
 	return out, nil
 }
 
-// parseCoverage decodes a Coverage table (format 1 or 2) into a map from glyph
-// to its coverage index.
-func parseCoverage(b []byte) (map[GlyphIndex]int, error) {
-	r := reader{b: b}
-	format := r.u16()
-	m := map[GlyphIndex]int{}
-	switch format {
-	case 1:
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			m[GlyphIndex(r.u16())] = i
-		}
-	case 2:
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			start := int(r.u16())
-			end := int(r.u16())
-			startCov := int(r.u16())
-			for g := start; g <= end; g++ {
-				m[GlyphIndex(g)] = startCov + (g - start)
-			}
-		}
-	default:
-		return nil, fmt.Errorf("opentype: coverage format %d", format)
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: coverage: %w", r.err)
-	}
-	return m, nil
-}
-
-// parseClassDef decodes a ClassDef table (format 1 or 2) into a map from glyph
-// to class. Glyphs absent from the map belong to class 0.
-func parseClassDef(b []byte) (map[GlyphIndex]int, error) {
-	r := reader{b: b}
-	format := r.u16()
-	m := map[GlyphIndex]int{}
-	switch format {
-	case 1:
-		start := int(r.u16())
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			m[GlyphIndex(start+i)] = int(r.u16())
-		}
-	case 2:
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			s := int(r.u16())
-			e := int(r.u16())
-			c := int(r.u16())
-			for g := s; g <= e; g++ {
-				m[GlyphIndex(g)] = c
-			}
-		}
-	default:
-		return nil, fmt.Errorf("opentype: classdef format %d", format)
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: classdef: %w", r.err)
-	}
-	return m, nil
-}
-
 // findScript resolves a script tag, falling back to "DFLT" and then to the
 // first script present, matching the behaviour of common shapers.
 func (h *layoutHeader) findScript(tag string) *scriptRecord {

@@ -305,7 +305,7 @@ func bombCases() []bombCase {
 	fv2.u16(0xFFFF)
 	fv2.b = append(fv2.b, zeros(40)...)
 	add("fvar-instancecount", bombFont("fvar", fv2.bytes()), errDeclaredCount, "fvar")
-	return cs
+	return append(cs, coverageBombCases()...)
 }
 
 func hvarWithStore(store []byte) []byte {

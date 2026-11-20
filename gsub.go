@@ -126,11 +126,11 @@ func parseSeqLookupRecords(r *reader, n int) []seqLookupRecord {
 
 // parseCoverageList decodes the Coverage tables at the given offsets (measured
 // from the start of b) into a slice of glyph->coverage-index maps.
-func parseCoverageList(b []byte, offs []uint16) ([]map[GlyphIndex]int, error) {
-	out := make([]map[GlyphIndex]int, len(offs))
-	memo := map[int]map[GlyphIndex]int{}
+func parseCoverageList(b []byte, offs []uint16) ([]*glyphMap, error) {
+	out := make([]*glyphMap, len(offs))
+	memo := map[int]*glyphMap{}
 	for i, off := range offs {
-		cov, err := memoOnce(memo, int(off), func() (map[GlyphIndex]int, error) {
+		cov, err := memoOnce(memo, int(off), func() (*glyphMap, error) {
 			return parseCoverage(subslice(b, int(off)))
 		})
 		if err != nil {
@@ -235,14 +235,14 @@ func parseGSUBSubtable(lookupType uint16, b []byte) (gsubSubtable, error) {
 // gsubSingle1 is a single-substitution format 1 subtable: covered glyphs are
 // shifted by a constant delta.
 type gsubSingle1 struct {
-	cov   map[GlyphIndex]int
+	cov   *glyphMap
 	delta int16
 }
 
 // gsubSingle2 is a single-substitution format 2 subtable: covered glyphs are
 // replaced by the glyph at their coverage index.
 type gsubSingle2 struct {
-	cov   map[GlyphIndex]int
+	cov   *glyphMap
 	subst []GlyphIndex
 }
 
@@ -285,7 +285,7 @@ func parseGSUBSingle(b []byte) (gsubSubtable, error) {
 }
 
 func (s *gsubSingle1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	if _, ok := s.cov[g[i]]; !ok {
+	if _, ok := s.cov.get(g[i]); !ok {
 		return g, i, false
 	}
 	g[i] = GlyphIndex(uint16(g[i]) + uint16(s.delta))
@@ -293,7 +293,7 @@ func (s *gsubSingle1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, 
 }
 
 func (s *gsubSingle2) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	idx, ok := s.cov[g[i]]
+	idx, ok := s.cov.get(g[i])
 	if !ok {
 		return g, i, false
 	}
@@ -306,7 +306,7 @@ func (s *gsubSingle2) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, 
 // gsubMultiple1 replaces a covered glyph with the sequence at its coverage
 // index (one -> many; an empty sequence deletes the glyph).
 type gsubMultiple1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	seqs [][]GlyphIndex
 }
 
@@ -358,7 +358,7 @@ func parseGSUBMultiple(b []byte) (gsubSubtable, error) {
 }
 
 func (s *gsubMultiple1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	idx, ok := s.cov[g[i]]
+	idx, ok := s.cov.get(g[i])
 	if !ok {
 		return g, i, false
 	}
@@ -376,7 +376,7 @@ func (s *gsubMultiple1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex
 // gsubAlternate1 replaces a covered glyph with the first (default) alternate of
 // its AlternateSet.
 type gsubAlternate1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]GlyphIndex
 }
 
@@ -411,7 +411,7 @@ func parseGSUBAlternate(b []byte) (gsubSubtable, error) {
 }
 
 func (s *gsubAlternate1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	idx, ok := s.cov[g[i]]
+	idx, ok := s.cov.get(g[i])
 	if !ok {
 		return g, i, false
 	}
@@ -435,7 +435,7 @@ type ligature struct {
 // gsubLigature1 is a ligature-substitution format 1 subtable. sets[i] holds the
 // ligatures whose first component is the glyph with coverage index i.
 type gsubLigature1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]ligature
 }
 
@@ -519,7 +519,7 @@ func parseLigature(b []byte) (ligature, error) {
 }
 
 func (s *gsubLigature1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	ci, ok := s.cov[g[i]]
+	ci, ok := s.cov.get(g[i])
 	if !ok {
 		return g, i, false
 	}
@@ -601,7 +601,7 @@ func (a *gsubApplier) spliceLigClusters(i int, removed []int) {
 
 // classOf returns the class of glyph g in a ClassDef map; glyphs absent from the
 // map belong to class 0.
-func classOf(m map[GlyphIndex]int, g GlyphIndex) int { return m[g] }
+func classOf(m *glyphMap, g GlyphIndex) int { return m.class(g) }
 
 // glyphPredsU builds glyph-id-equality predicates from a uint16 sequence (the
 // on-disk form of GSUB input, backtrack and lookahead glyph sequences).
@@ -627,7 +627,7 @@ func glyphPredsGI(seq []GlyphIndex) []glyphPred {
 
 // classPredsU builds class-equality predicates from a uint16 class sequence and
 // a ClassDef map.
-func classPredsU(seq []uint16, cd map[GlyphIndex]int) []glyphPred {
+func classPredsU(seq []uint16, cd *glyphMap) []glyphPred {
 	preds := make([]glyphPred, len(seq))
 	for k := range seq {
 		v := int(seq[k])
@@ -739,20 +739,20 @@ func parseSeqRuleSets(b []byte, offs []uint16) ([][]seqRule, error) {
 
 // gsubContext1 is contextual substitution format 1 (glyph-based).
 type gsubContext1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]seqRule
 }
 
 // gsubContext2 is contextual substitution format 2 (class-based).
 type gsubContext2 struct {
-	cov      map[GlyphIndex]int
-	classDef map[GlyphIndex]int
+	cov      *glyphMap
+	classDef *glyphMap
 	sets     [][]seqRule
 }
 
 // gsubContext3 is contextual substitution format 3 (coverage-based).
 type gsubContext3 struct {
-	covs    []map[GlyphIndex]int
+	covs    []*glyphMap
 	records []seqLookupRecord
 }
 
@@ -817,7 +817,7 @@ func parseGSUBContext(b []byte) (gsubSubtable, error) {
 }
 
 func (s *gsubContext1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	ci, ok := s.cov[g[i]]
+	ci, ok := s.cov.get(g[i])
 	if !ok || ci >= len(s.sets) {
 		return g, i, false
 	}
@@ -833,7 +833,7 @@ func (s *gsubContext1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex,
 }
 
 func (s *gsubContext2) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	if _, ok := s.cov[g[i]]; !ok {
+	if _, ok := s.cov.get(g[i]); !ok {
 		return g, i, false
 	}
 	cls := classOf(s.classDef, g[i])
@@ -929,24 +929,24 @@ func parseChainRuleSets(b []byte, offs []uint16) ([][]chainRule, error) {
 
 // gsubChain1 is chaining-contextual substitution format 1 (glyph-based).
 type gsubChain1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]chainRule
 }
 
 // gsubChain2 is chaining-contextual substitution format 2 (class-based).
 type gsubChain2 struct {
-	cov       map[GlyphIndex]int
-	backtrack map[GlyphIndex]int
-	input     map[GlyphIndex]int
-	lookahead map[GlyphIndex]int
+	cov       *glyphMap
+	backtrack *glyphMap
+	input     *glyphMap
+	lookahead *glyphMap
 	sets      [][]chainRule
 }
 
 // gsubChain3 is chaining-contextual substitution format 3 (coverage-based).
 type gsubChain3 struct {
-	backtrack []map[GlyphIndex]int
-	input     []map[GlyphIndex]int
-	lookahead []map[GlyphIndex]int
+	backtrack []*glyphMap
+	input     []*glyphMap
+	lookahead []*glyphMap
 	records   []seqLookupRecord
 }
 
@@ -1033,7 +1033,7 @@ func parseGSUBChain(b []byte) (gsubSubtable, error) {
 }
 
 func (s *gsubChain1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	ci, ok := s.cov[g[i]]
+	ci, ok := s.cov.get(g[i])
 	if !ok || ci >= len(s.sets) {
 		return g, i, false
 	}
@@ -1053,7 +1053,7 @@ func (s *gsubChain1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, i
 }
 
 func (s *gsubChain2) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	if _, ok := s.cov[g[i]]; !ok {
+	if _, ok := s.cov.get(g[i]); !ok {
 		return g, i, false
 	}
 	cls := classOf(s.input, g[i])
@@ -1115,9 +1115,9 @@ func parseGSUBExtension(b []byte) (gsubSubtable, error) {
 // is replaced by substitute[coverageIndex] when its backtrack and lookahead
 // contexts match. The enclosing lookup is applied to the run back-to-front.
 type gsubReverseChain1 struct {
-	cov       map[GlyphIndex]int
-	backtrack []map[GlyphIndex]int
-	lookahead []map[GlyphIndex]int
+	cov       *glyphMap
+	backtrack []*glyphMap
+	lookahead []*glyphMap
 	subst     []GlyphIndex
 }
 
@@ -1158,7 +1158,7 @@ func parseGSUBReverse(b []byte) (gsubSubtable, error) {
 }
 
 func (s *gsubReverseChain1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
-	idx, ok := s.cov[g[i]]
+	idx, ok := s.cov.get(g[i])
 	if !ok || idx >= len(s.subst) {
 		return g, i, false
 	}
