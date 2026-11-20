@@ -209,6 +209,29 @@ func TestCompositeFaultsAreNotMistakenForBudget(t *testing.T) {
 	}
 }
 
+// A glyph that references itself many times is a cycle, not a budget question:
+// the counting pass must not walk it fanout^depth times before the loader
+// reports it (8^9 visits take seconds, a guarded pass microseconds).
+func TestCompositeSelfCycleIsNotWalked(t *testing.T) {
+	const fanout = 8
+	comps := make([]component, fanout)
+	for j := range comps {
+		comps[j] = component{glyphIndex: 1, argsAreXY: true, more: j < fanout-1}
+	}
+	f := longLocaFont(t, [][]byte{
+		simpleGlyphBytes([][]point{{{x: 1, y: 1, on: true}}}),
+		compositeGlyphBytes(comps),
+	})
+	start := time.Now()
+	_, err := f.glyphContours(1)
+	if err == nil || !strings.Contains(err.Error(), "cyclic") {
+		t.Fatalf("err = %v, want the cycle error", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("a self-referencing composite took %s", d)
+	}
+}
+
 // endPtsOfContours that decreases used to index past the last contour's points
 // (a panic found by FuzzGlyphContours).
 func TestSimpleGlyphDecreasingEndPts(t *testing.T) {
