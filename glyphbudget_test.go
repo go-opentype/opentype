@@ -3,6 +3,7 @@ package opentype
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,7 +80,9 @@ func longLocaFont(t testing.TB, glyphs [][]byte) *Font {
 
 func TestCompositeBombRefused(t *testing.T) {
 	const levels = 8 // maxCompositeDepth: the deepest chain the loader walks
-	for k := 1; k <= 12; k++ {
+	// Up to k=6 (1.7 million points unrefused), so that a missing refusal shows
+	// as a failed assertion, not as an hour of expansion.
+	for k := 1; k <= 6; k++ {
 		f := compositeBomb(t, k, levels)
 		var err error
 		var n int
@@ -157,11 +160,11 @@ func TestCompositeContourBomb(t *testing.T) {
 
 // Through the public API, and the CPU cost of a refusal is nothing.
 func TestCompositeBombThroughFace(t *testing.T) {
-	f := compositeBomb(t, 1000, 8) // 1000^8 contours from a 50 KB font
+	f := compositeBomb(t, 5, 8) // the issue's reproducer: 1.36 GB from a 924-byte font
 	start := time.Now()
 	delta := allocated(func() {
 		if _, ok := f.NewFace(16).GlyphOutline(8); ok {
-			t.Error("GlyphOutline(8) of a 1000^8 composite succeeded")
+			t.Error("GlyphOutline(8) of a 5^8 composite succeeded")
 		}
 	})
 	if delta > bombAllocLimit || time.Since(start) > 2*time.Second {
@@ -175,24 +178,33 @@ func TestCompositeFaultsAreNotMistakenForBudget(t *testing.T) {
 	pt := simpleGlyphBytes([][]point{{{x: 1, y: 1, on: true}}})
 	ref := func(g uint16, more bool) component { return component{glyphIndex: g, argsAreXY: true, more: more} }
 	trunc := compositeGlyphBytes([]component{ref(0, true)}) // MORE set, record missing
-	cases := map[string][][]byte{
-		"out of range":     {pt, compositeGlyphBytes([]component{ref(0, true), ref(99, false)})},
-		"self cycle":       {pt, compositeGlyphBytes([]component{ref(0, true), ref(1, false)})},
-		"empty glyph":      {pt, nil, compositeGlyphBytes([]component{ref(1, true), ref(0, false)})},
-		"truncated sub":    {pt, trunc, compositeGlyphBytes([]component{ref(1, false)})},
-		"truncated simple": {pt, []byte{0, 1, 0, 0, 0, 0}, compositeGlyphBytes([]component{ref(1, false)})},
+	cases := []struct {
+		name   string
+		glyphs [][]byte
+		want   string // "" : loads
+		edit   func(f *Font)
+	}{
+		{"out of range", [][]byte{pt, compositeGlyphBytes([]component{ref(0, true), ref(99, false)})}, "out of range", nil},
+		{"self cycle", [][]byte{pt, compositeGlyphBytes([]component{ref(0, true), ref(1, false)})}, "cyclic", nil},
+		{"empty glyph", [][]byte{pt, nil, compositeGlyphBytes([]component{ref(1, true), ref(0, false)})}, "", nil},
+		{"truncated sub", [][]byte{pt, trunc, compositeGlyphBytes([]component{ref(1, false)})}, "composite glyph", nil},
+		{"truncated simple", [][]byte{pt, {0, 1, 0, 0, 0, 0}, compositeGlyphBytes([]component{ref(1, false)})}, "simple glyph", nil},
+		{"loca not monotonic", [][]byte{pt, pt, pt, compositeGlyphBytes([]component{ref(1, false)})}, "not monotonic",
+			func(f *Font) { f.loca[1] = f.loca[2] + 2 }},
+		{"loca past glyf", [][]byte{pt, pt, pt, compositeGlyphBytes([]component{ref(1, false)})}, errTruncated.Error(),
+			func(f *Font) { f.loca[2] = uint32(len(f.glyf)) + 10 }},
 	}
-	for name, glyphs := range cases {
-		f := longLocaFont(t, glyphs)
-		_, err := f.glyphContours(GlyphIndex(len(glyphs) - 1))
-		if name == "empty glyph" {
-			if err != nil {
-				t.Errorf("%s: %v", name, err)
-			}
-			continue
+	for _, c := range cases {
+		f := longLocaFont(t, c.glyphs)
+		if c.edit != nil {
+			c.edit(f)
 		}
-		if err == nil || errors.Is(err, errGlyphBudget) {
-			t.Errorf("%s: err = %v", name, err)
+		_, err := f.glyphContours(GlyphIndex(len(c.glyphs) - 1))
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.want != "" && (err == nil || errors.Is(err, errGlyphBudget) || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("%s: err = %v, want %q", c.name, err, c.want)
 		}
 	}
 }
@@ -218,9 +230,11 @@ func TestSimpleGlyphDecreasingEndPts(t *testing.T) {
 
 // A chain deeper than maxCompositeDepth is reported as before.
 func TestCompositeTooDeepStillReported(t *testing.T) {
-	f := compositeBomb(t, 1, maxCompositeDepth+2)
+	// k=4 would be a budget refusal if the counting pass walked past the depth
+	// limit; the nesting error is what the loader says about it.
+	f := compositeBomb(t, 4, maxCompositeDepth+2)
 	_, err := f.glyphContours(GlyphIndex(maxCompositeDepth + 2))
-	if err == nil || errors.Is(err, errGlyphBudget) {
+	if err == nil || errors.Is(err, errGlyphBudget) || !strings.Contains(err.Error(), "nesting too deep") {
 		t.Fatalf("err = %v, want the nesting error", err)
 	}
 }

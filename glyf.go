@@ -159,12 +159,18 @@ func (f *Font) glyphCost(root, gid GlyphIndex, depth int, visited map[GlyphIndex
 	if c, ok := memo[gid]; ok {
 		return c, nil
 	}
-	if depth > maxCompositeDepth || int(gid) >= f.numGlyphs || visited[gid] {
-		return 0, nil
+	if depth > maxCompositeDepth {
+		return 0, nil // loadGlyph reports the nesting
+	}
+	if int(gid) >= f.numGlyphs {
+		return 0, nil // loadGlyph reports the index
+	}
+	if visited[gid] {
+		return 0, nil // loadGlyph reports the cycle
 	}
 	start, end := f.loca[gid], f.loca[gid+1]
-	if start >= end || int(end) > len(f.glyf) {
-		return 0, nil
+	if start > end || int(end) > len(f.glyf) {
+		return 0, nil // loadGlyph reports the loca
 	}
 	r := reader{b: f.glyf[start:end]}
 	n := int(r.i16())
@@ -189,9 +195,6 @@ func (f *Font) glyphCost(root, gid GlyphIndex, depth int, visited map[GlyphIndex
 			cost += sub
 		}
 		delete(visited, gid)
-	}
-	if r.err != nil {
-		return 0, nil
 	}
 	if cost > maxGlyphPoints {
 		return 0, fmt.Errorf("opentype: glyph %d: %w: more than %d points", int(root), errGlyphBudget, maxGlyphPoints)
