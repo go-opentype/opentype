@@ -551,6 +551,9 @@ func (m *cff2machine) run(code []byte, depth int) error {
 			i += n - 1
 			continue
 		}
+		if err := m.tm.spend("cff2"); err != nil {
+			return err
+		}
 		ni, ret, err := m.operator(b0, code, i, depth)
 		if err != nil {
 			return err

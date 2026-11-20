@@ -115,7 +115,89 @@ func (f *Font) loadGlyph(gid GlyphIndex, depth int, visited map[GlyphIndex]bool,
 		}
 		return f.varySimple(int(gid), contours, norm), nil
 	}
+	if depth == 0 {
+		if err := f.checkGlyphBudget(gid); err != nil {
+			return nil, err
+		}
+	}
 	return f.compositeGlyph(int(gid), &r, depth, visited, norm)
+}
+
+// maxGlyphPoints is the per-glyph budget of a composite: the number of points
+// it expands to, every reference counted, each contour counting at least one
+// point. TrueType itself cannot name more than 65535 points in one glyph (a
+// simple glyph's endPtsOfContours entries are uint16), so a composite that
+// needs more is not one the format can express. Measured on every TrueType
+// font of this machine plus the repository's testdata (209 TrueType fonts),
+// the largest expansion is 4103 points (Kokonor, glyph 214), 16 times under
+// it; the largest maxp maxCompositePoints declared is 3886. maxp is not used
+// as the bound: a font states it and an attacker states it too, and FreeType
+// repairs the sibling field maxComponentDepth when a font misdeclares it
+// (src/truetype/ttgload.c, load_truetype_glyph). FreeType's own composite
+// guards there are a recursion limit of 100 and a cycle check; it has no
+// point-count bound, so this is the stricter one the issue asks for. A reference counts however many times it is made, which
+// is what bounds the k^8 expansion of a composite that names the glyph below
+// it k times: the memoized count is computed before any contour is built.
+const maxGlyphPoints = 65535
+
+// errGlyphBudget is wrapped into the error of a glyph that exceeds
+// maxGlyphPoints.
+var errGlyphBudget = errors.New("glyph exceeds its per-glyph point budget")
+
+// checkGlyphBudget counts, without building anything, the points glyph root
+// will expand to and refuses it past maxGlyphPoints. It only judges the budget:
+// a structural fault (bad loca, cycle, nesting, truncation) costs zero here and
+// is reported by the expansion that follows, with its own message.
+func (f *Font) checkGlyphBudget(root GlyphIndex) error {
+	_, err := f.glyphCost(root, root, 0, map[GlyphIndex]bool{}, map[GlyphIndex]int{})
+	return err
+}
+
+// glyphCost is the point count of glyph gid, memoized per glyph ID so that a
+// glyph referenced many times is counted once.
+func (f *Font) glyphCost(root, gid GlyphIndex, depth int, visited map[GlyphIndex]bool, memo map[GlyphIndex]int) (int, error) {
+	if c, ok := memo[gid]; ok {
+		return c, nil
+	}
+	if depth > maxCompositeDepth || int(gid) >= f.numGlyphs || visited[gid] {
+		return 0, nil
+	}
+	start, end := f.loca[gid], f.loca[gid+1]
+	if start >= end || int(end) > len(f.glyf) {
+		return 0, nil
+	}
+	r := reader{b: f.glyf[start:end]}
+	n := int(r.i16())
+	r.skip(8) // xMin, yMin, xMax, yMax
+	cost := 0
+	if n >= 0 {
+		for i := 0; i < n; i++ {
+			cost = int(r.u16()) + 1 // the last endPtsOfContours entry wins
+		}
+		cost = max(cost, n)
+	} else {
+		comps, err := parseComponents(&r)
+		if err != nil {
+			return 0, nil
+		}
+		visited[gid] = true
+		for _, comp := range comps {
+			sub, err := f.glyphCost(root, comp.gid, depth+1, visited, memo)
+			if err != nil {
+				return 0, err
+			}
+			cost += sub
+		}
+		delete(visited, gid)
+	}
+	if r.err != nil {
+		return 0, nil
+	}
+	if cost > maxGlyphPoints {
+		return 0, fmt.Errorf("opentype: glyph %d: %w: more than %d points", int(root), errGlyphBudget, maxGlyphPoints)
+	}
+	memo[gid] = cost
+	return cost, nil
 }
 
 // simpleGlyph decodes a simple (non-composite) glyph's n contours.
@@ -123,6 +205,12 @@ func (f *Font) simpleGlyph(r *reader, n int) ([]contour, error) {
 	endPts := make([]uint16, n)
 	for i := range endPts {
 		endPts[i] = r.u16()
+		// The format requires endPtsOfContours to be non-decreasing; one that is
+		// not would index past the points of the last contour (found by
+		// FuzzGlyphContours).
+		if i > 0 && endPts[i] < endPts[i-1] {
+			return nil, errors.New("opentype: simple glyph: endPtsOfContours decreases")
+		}
 	}
 	numPoints := 0
 	if n > 0 {

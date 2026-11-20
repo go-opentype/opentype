@@ -5,6 +5,7 @@
 package opentype
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -88,6 +89,48 @@ const maxT2Stack = 48
 // in font units. A fixed count keeps the interpreter branch-free here; the
 // segments are re-scaled to device space by the rasteriser.
 const cffCurveSteps = 8
+
+// maxT2Ops is the operation budget of one glyph: the number of operators one
+// charstring run may execute, counting those inside every subroutine call
+// (CFF and CFF2 alike). maxT2Depth bounds how deep subroutines nest, not how
+// many calls are made, so a subroutine that calls the one below it k times
+// executes k^maxT2Depth operators from a charstring of a few hundred bytes.
+// Measured over the 155 CFF fonts of one machine (every font under
+// /System/Library/Fonts, /Library/Fonts and this repository's testdata, STIX
+// Two Math included), the busiest glyph executes 1267 operators (STIX Two Math
+// glyph 2255); 2^17 is a 100-fold margin over it, and a refused glyph costs
+// a few milliseconds. FreeType (src/psaux/psintrp.c) caps only the nesting,
+// CF2_MAX_SUBR = 16, and the hint count; it has no operator budget, so this
+// is the stricter bound the issue asks for.
+const maxT2Ops = 1 << 17
+
+// maxT2Points is the point budget of one glyph: the outline points (curves
+// counted as their cffCurveSteps flattened points) one charstring run may emit.
+// One operator draws at most maxT2Stack/6 curves, 64 points, so the operation
+// budget alone would allow maxT2Ops*64 points (CFF2's 513-operand stack, 680);
+// this bound keeps the outline itself near 1.5 MB. The largest glyph measured
+// on the same fonts emits 7429 points (STIX General glyph 1477), so the bound
+// is a 9-fold margin; it is also the 65535 points TrueType allows a glyph
+// (see maxGlyphPoints). The count is checked before each operator, so one
+// operator can overshoot it by its own few hundred points at most.
+const maxT2Points = 1 << 16
+
+// errT2Budget is returned, wrapped with the font kind, when a glyph exceeds
+// maxT2Ops or maxT2Points.
+var errT2Budget = errors.New("charstring exceeds its per-glyph budget")
+
+// spend charges one operator against the glyph's budgets. kind is "cff" or
+// "cff2" and only names the table in the error.
+func (m *t2machine) spend(kind string) error {
+	m.ops++
+	if m.ops > maxT2Ops {
+		return fmt.Errorf("opentype: %s: %w (more than %d operators)", kind, errT2Budget, maxT2Ops)
+	}
+	if m.npts > maxT2Points {
+		return fmt.Errorf("opentype: %s: %w (more than %d points)", kind, errT2Budget, maxT2Points)
+	}
+	return nil
+}
 
 // readOffset reads a size-byte (1..4) big-endian integer from r.
 func readOffset(r *reader, size int) int {
@@ -530,6 +573,8 @@ type t2machine struct {
 	widthDone bool
 	done      bool
 	seacDepth int // endchar-seac accent-composition recursion depth
+	ops       int // operators executed so far, subroutines included (maxT2Ops)
+	npts      int // outline points emitted so far (maxT2Points)
 
 	// Hinting data recorded during interpretation for the grid-fitter (cffhint.go):
 	// the resolved stem-edge positions in font units (in declaration order, which
@@ -629,6 +674,7 @@ func (m *t2machine) moveTo(dx, dy float64) {
 	m.x += dx
 	m.y += dy
 	m.cur = contour{{x: m.x, y: m.y, on: true}}
+	m.npts++
 }
 
 // lineTo adds a straight segment to the relative point.
@@ -636,6 +682,7 @@ func (m *t2machine) lineTo(dx, dy float64) {
 	m.x += dx
 	m.y += dy
 	m.cur = append(m.cur, outlinePoint{x: m.x, y: m.y, on: true})
+	m.npts++
 }
 
 // curveTo flattens a cubic Bézier from the pen position through control points
@@ -650,6 +697,7 @@ func (m *t2machine) curveTo(x1, y1, x2, y2, x3, y3 float64) {
 		m.cur = append(m.cur, outlinePoint{x: bx, y: by, on: true})
 	}
 	m.x, m.y = x3, y3
+	m.npts += cffCurveSteps
 }
 
 // run executes a charstring (or subroutine) body. depth guards recursion.
@@ -671,6 +719,9 @@ func (m *t2machine) run(code []byte, depth int) error {
 			}
 			i += n - 1
 			continue
+		}
+		if err := m.spend("cff"); err != nil {
+			return err
 		}
 		stop, ni, err := m.operator(b0, code, i, depth)
 		if err != nil {
