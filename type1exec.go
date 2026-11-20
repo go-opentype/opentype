@@ -46,9 +46,39 @@ const (
 	maxT1PostScriptSize = 32
 )
 
+// t1budget is what one glyph may spend, accent components included: the same
+// maxT2Ops and maxT2Points as CFF, because maxT1Depth bounds how deep
+// subroutines nest, not how many calls are made, so a subroutine calling the
+// one below it k times executes k^maxT1Depth operators from a few hundred
+// bytes. The budget is shared by the machines a seac glyph starts for its two
+// components (up to 2+4+8+16 of them at maxSeacDepth), so the bound is per
+// glyph and not per machine. Measured over every Type 1 program on one machine
+// (930 parsed .pfa/.pfb files, paths counted once each: X11's Type1 directory,
+// the Tectonic bundle cache and others, STIX General included: 423392 glyphs;
+// 192 more files are refused by the parser), the busiest glyph executes 7485
+// operators (STIX General uni2593) and the largest emits 7429 points (the same
+// glyph), so maxT2Ops is a 17-fold margin and maxT2Points a 8.8-fold one.
+type t1budget struct {
+	ops  int // operators executed so far, subroutines included (maxT2Ops)
+	npts int // outline points emitted so far (maxT2Points)
+}
+
+// spend charges one operator against the glyph's budgets.
+func (b *t1budget) spend() error {
+	b.ops++
+	if b.ops > maxT2Ops {
+		return fmt.Errorf("opentype: type1: %w (more than %d operators)", errT2Budget, maxT2Ops)
+	}
+	if b.npts > maxT2Points {
+		return fmt.Errorf("opentype: type1: %w (more than %d points)", errT2Budget, maxT2Points)
+	}
+	return nil
+}
+
 // t1machine runs one Type 1 charstring.
 type t1machine struct {
 	f         *type1Font
+	budget    *t1budget
 	stack     []float64
 	ps        []float64 // the interpreter's other stack, which othersubrs use
 	contours  []contour
@@ -77,11 +107,16 @@ func (t *type1Font) outline(gid int) ([]contour, error) {
 
 // outlineByName draws the glyph a name stands for.
 func (t *type1Font) outlineByName(name string, seacDepth int) ([]contour, error) {
+	return t.outlineBudgeted(name, seacDepth, &t1budget{})
+}
+
+// outlineBudgeted draws a glyph against a budget its accent components share.
+func (t *type1Font) outlineBudgeted(name string, seacDepth int, b *t1budget) ([]contour, error) {
 	cs, ok := t.charstrings[name]
 	if !ok {
 		return nil, fmt.Errorf("opentype: type1: no glyph called %q", name)
 	}
-	m := &t1machine{f: t, seacDepth: seacDepth}
+	m := &t1machine{f: t, seacDepth: seacDepth, budget: b}
 	if err := m.run(cs, 0); err != nil {
 		return nil, err
 	}
@@ -177,6 +212,9 @@ func (m *t1machine) run(cs []byte, depth int) error {
 			}
 			esc := cs[i]
 			i++
+			if err := m.budget.spend(); err != nil {
+				return err
+			}
 			stop, err := m.escaped(esc, depth)
 			if err != nil {
 				return err
@@ -185,6 +223,9 @@ func (m *t1machine) run(cs []byte, depth int) error {
 				return nil
 			}
 			continue
+		}
+		if err := m.budget.spend(); err != nil {
+			return err
 		}
 		stop, err := m.operator(op, depth)
 		if err != nil {
@@ -433,7 +474,7 @@ func (m *t1machine) component(code int) ([]contour, error) {
 	if !ok || int(sid) >= nStdStrings {
 		return nil, fmt.Errorf("opentype: type1: code %d is not in the standard encoding", code)
 	}
-	return m.f.outlineByName(cffStandardStrings[sid], m.seacDepth+1)
+	return m.f.outlineBudgeted(cffStandardStrings[sid], m.seacDepth+1, m.budget)
 }
 
 // clear empties the operand stack, which every operator that consumes one does.
@@ -443,6 +484,7 @@ func (m *t1machine) clear() { m.stack = m.stack[:0] }
 func (m *t1machine) moveTo(dx, dy float64) {
 	m.x += dx
 	m.y += dy
+	m.budget.npts++
 	if m.inFlex {
 		m.flexPts = append(m.flexPts, outlinePoint{x: m.x, y: m.y, on: true})
 		return
@@ -456,6 +498,7 @@ func (m *t1machine) lineTo(dx, dy float64) {
 	m.x += dx
 	m.y += dy
 	m.cur = append(m.cur, outlinePoint{x: m.x, y: m.y, on: true})
+	m.budget.npts++
 }
 
 // rrcurveTo adds a curve given by three relative steps.
@@ -476,6 +519,7 @@ func (m *t1machine) curveTo(x1, y1, x2, y2, x3, y3 float64) {
 		m.cur = append(m.cur, outlinePoint{x: bx, y: by, on: true})
 	}
 	m.x, m.y = x3, y3
+	m.budget.npts += cffCurveSteps
 }
 
 // closePath ends the contour in progress. A Type 1 program says so out loud,
