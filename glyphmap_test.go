@@ -178,3 +178,46 @@ func TestGlyphMapAllocatesNothingWhenSorted(t *testing.T) {
 		t.Errorf("get allocated %v times", n)
 	}
 }
+
+// TestMatchContextChecksTheAnchor: the first coverage must cover the anchor
+// glyph even when the rest of the sequence would match.
+func TestMatchContextChecksTheAnchor(t *testing.T) {
+	covs := []*glyphMap{
+		glyphMapFromMap(map[GlyphIndex]int{5: 0}),
+		glyphMapFromMap(map[GlyphIndex]int{6: 0}),
+	}
+	if _, _, ok := (skipper{}).matchContext([]GlyphIndex{9, 6}, 0, covs); ok {
+		t.Error("an uncovered anchor matched")
+	}
+	if pos, _, ok := (skipper{}).matchContext([]GlyphIndex{5, 6}, 0, covs); !ok || len(pos) != 2 {
+		t.Errorf("a covered sequence did not match: %v %v", pos, ok)
+	}
+}
+
+// TestSortedTablesAreSearchedInPlace: a table in spec order keeps the font's
+// bytes (the fast path); one out of order is normalised. Both answer alike, so
+// only the kind tells the paths apart.
+func TestSortedTablesAreSearchedInPlace(t *testing.T) {
+	cases := []struct {
+		name  string
+		parse func([]byte) (*glyphMap, error)
+		b     []byte
+		want  gmKind
+	}{
+		{"coverage1 sorted", parseCoverage, buildCoverage1(1, 2, 3), gmCov1},
+		{"coverage1 unsorted", parseCoverage, buildCoverage1(3, 1, 2), gmSegs},
+		{"coverage2 sorted", parseCoverage, buildCoverage2([3]int{1, 2, 0}, [3]int{4, 5, 2}), gmCov2},
+		{"coverage2 unsorted", parseCoverage, buildCoverage2([3]int{4, 5, 2}, [3]int{1, 2, 0}), gmSegs},
+		{"classdef2 sorted", parseClassDef, buildClassDef2([3]int{1, 2, 1}, [3]int{4, 5, 2}), gmClass2},
+		{"classdef2 unsorted", parseClassDef, buildClassDef2([3]int{4, 5, 2}, [3]int{1, 2, 1}), gmSegs},
+	}
+	for _, c := range cases {
+		m, err := c.parse(c.b)
+		if err != nil {
+			t.Fatal(c.name, err)
+		}
+		if m.kind != c.want {
+			t.Errorf("%s: kind %d, want %d", c.name, m.kind, c.want)
+		}
+	}
+}
