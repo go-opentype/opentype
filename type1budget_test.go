@@ -78,7 +78,7 @@ func TestType1BombRefused(t *testing.T) {
 				n += len(c)
 			}
 		})
-		if delta > bombAllocLimit {
+		if delta > glyphBombAllocLimit {
 			t.Errorf("k=%d allocated %d bytes", k, delta)
 		}
 		// k^levels overflows a 32-bit int from k=4, so only k=1 (one line) is

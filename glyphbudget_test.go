@@ -2,7 +2,6 @@ package opentype
 
 import (
 	"errors"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,17 +11,11 @@ import (
 // exponentially many points. Every bound below is spelled through the constant
 // it tests, never through its value.
 
-// bombAllocLimit is how much one refused glyph may allocate: the refusal has to
-// come before the expansion, so what is left is the font's own tables.
-const bombAllocLimit = 8 << 20
-
-func allocated(fn func()) uint64 {
-	var a, b runtime.MemStats
-	runtime.ReadMemStats(&a)
-	fn()
-	runtime.ReadMemStats(&b)
-	return b.TotalAlloc - a.TotalAlloc
-}
+// glyphBombAllocLimit is how much one refused glyph may allocate: the refusal
+// has to come before the expansion, so what is left is the font's own tables.
+// (bounds_test.go's bombAllocLimit is the Parse-time bound; allocated is shared
+// with it.)
+const glyphBombAllocLimit = 8 << 20
 
 func ipow(k, n int) int {
 	r := 1
@@ -93,7 +86,7 @@ func TestCompositeBombRefused(t *testing.T) {
 				n += len(c)
 			}
 		})
-		if delta > bombAllocLimit {
+		if delta > glyphBombAllocLimit {
 			t.Errorf("k=%d allocated %d bytes", k, delta)
 		}
 		points := ipow(k, levels)
@@ -167,7 +160,7 @@ func TestCompositeBombThroughFace(t *testing.T) {
 			t.Error("GlyphOutline(8) of a 5^8 composite succeeded")
 		}
 	})
-	if delta > bombAllocLimit || time.Since(start) > 2*time.Second {
+	if delta > glyphBombAllocLimit || time.Since(start) > 2*time.Second {
 		t.Errorf("refusal took %s and %d bytes", time.Since(start), delta)
 	}
 }
@@ -333,7 +326,7 @@ func TestCharstringBombRefused(t *testing.T) {
 					n += len(c)
 				}
 			})
-			if delta > bombAllocLimit {
+			if delta > glyphBombAllocLimit {
 				t.Errorf("%s k=%d allocated %d bytes", kind, k, delta)
 			}
 			switch {
