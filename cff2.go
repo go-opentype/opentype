@@ -467,8 +467,29 @@ func (c *cff2Table) outline(gid int, coords []int16) ([]contour, error) {
 // activation and the glyph's Font-DICT Private-DICT hint parameters) that
 // cffhint.go's grid-fitter consumes. The outline is still instanced at coords.
 func (c *cff2Table) outlineHints(gid int, coords []int16) ([]contour, *cffGlyphHints, error) {
+	m, err := c.runGlyph(gid, coords)
+	if err != nil {
+		return nil, nil, err
+	}
+	fd := 0
+	if c.fdSelect != nil {
+		fd = c.fdSelect[gid]
+	}
+	gh := &cffGlyphHints{
+		stems:      m.tm.stemHints,
+		hintMasks:  m.tm.hintMasks,
+		cntrGroups: m.tm.cntrGroups,
+		flexRanges: m.tm.flexRanges,
+		priv:       c.privHints[fd],
+	}
+	return m.tm.contours, gh, nil
+}
+
+// runGlyph interprets glyph gid's CFF2 charstring at coords and returns the
+// finished interpreter: its outline, hinting data and control box.
+func (c *cff2Table) runGlyph(gid int, coords []int16) (*cff2machine, error) {
 	if gid < 0 || gid >= len(c.charStrings) {
-		return nil, nil, fmt.Errorf("opentype: cff2 glyph %d out of range", gid)
+		return nil, fmt.Errorf("opentype: cff2 glyph %d out of range", gid)
 	}
 	fd := 0
 	if c.fdSelect != nil {
@@ -490,20 +511,13 @@ func (c *cff2Table) outlineHints(gid int, coords []int16) ([]contour, *cffGlyphH
 		m.coords[a] = float64(coords[a]) / 16384.0
 	}
 	if err := m.computeBV(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := m.run(c.charStrings[gid], 0); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	m.tm.finishContour()
-	gh := &cffGlyphHints{
-		stems:      m.tm.stemHints,
-		hintMasks:  m.tm.hintMasks,
-		cntrGroups: m.tm.cntrGroups,
-		flexRanges: m.tm.flexRanges,
-		priv:       c.privHints[fd],
-	}
-	return m.tm.contours, gh, nil
+	return m, nil
 }
 
 // computeBV rebuilds the blend vector for the active vsindex: a leading 1 (the

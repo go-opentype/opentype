@@ -134,6 +134,7 @@ caches rasterised glyphs and is **not** safe for concurrent use; build one
 | `(*Face).Advance(r rune) int` / `(*Face).Measure(s string) int` | Rune / string advance in pixels. |
 | `(*Face).Kern(prev, r rune) int` / `(*Face).MeasureKerned(s string) int` | GPOS-or-`kern` pair adjustment. |
 | `(*Face).GlyphMask(r, x, y) (image.Rectangle, *image.Alpha, image.Point, int, bool)` | Rasterised glyph + advance. |
+| `(*Face).GlyphControlBox(g GlyphIndex) (xMin, yMin, xMax, yMax float64, ok bool)` | A glyph's **control box** in font units — every outline point, the cubics' control points included, unhinted: FreeType's `FT_Glyph_Get_CBox(…, FT_GLYPH_BBOX_UNSCALED, …)`, exact. XeTeX takes an OpenType glyph's italic correction from it (`max(0, xMax − advance)`). `GlyphOutline` returns CFF outlines flattened, so their extent is the curve's, which can fall short of it. |
 | `(*Face).Shape(text string, features ...string) []GlyphIndex` | GSUB-substituted glyph run. |
 | `(*Face).ShapePositioned(text string, features ...string) []PositionedGlyph` | GSUB + GPOS glyph run with pen offsets. |
 | `(*Face).SetVariation(coords map[string]float64)` | Instance a variable font at the given axis coordinates. |
