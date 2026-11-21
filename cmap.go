@@ -68,6 +68,7 @@ type cmapSubtable struct {
 // table exposed through Font.GlyphIndexVariation; it never competes for f.cmap
 // and its presence does not change ordinary GlyphIndex behaviour.
 func (f *Font) parseCmap(b []byte) error {
+	bud := f.budget(len(b))
 	r := reader{b: b}
 	r.skip(2) // version
 	numTables := int(r.u16())
@@ -75,20 +76,37 @@ func (f *Font) parseCmap(b []byte) error {
 		return fmt.Errorf("opentype: cmap header: %w", r.err)
 	}
 
+	if err := r.room("cmap", "record (numTables)", uint64(numTables), 8); err != nil {
+		return err
+	}
 	var best cmapLookup
 	bestScore := 0
+	// Records may share one subtable offset. Each distinct subtable is decoded
+	// once and every record that names it shares the result: 50 records on one
+	// 100000-group subtable cost one subtable, not fifty (issue #75).
+	type decoded struct {
+		lk    cmapLookup
+		score int
+	}
+	done := map[uint32]decoded{}
 	for i := 0; i < numTables; i++ {
 		platform := r.u16()
 		encoding := r.u16()
-		offset := int(r.u32())
-		if r.err != nil {
-			return fmt.Errorf("opentype: cmap record: %w", r.err)
-		}
-		if offset+2 > len(b) {
+		// uint32, not int: on a 32-bit build int(0xFFFFFFFF) is -1, and
+		// offset+2 > len(b) would then pass a subtable that is not there.
+		offset := r.u32()
+		if uint64(offset)+2 > uint64(len(b)) {
 			return fmt.Errorf("opentype: cmap subtable offset: %w", errTruncated)
 		}
 		sub := b[offset:]
 		format := be16(sub)
+		if d, ok := done[offset]; ok {
+			if d.lk != nil {
+				f.cmaps = append(f.cmaps, cmapSubtable{platform: platform, encoding: encoding, format: format, lookup: d.lk})
+				// d.score cannot beat bestScore: it was counted when d was decoded.
+			}
+			continue
+		}
 		var (
 			lk    cmapLookup
 			score int
@@ -99,32 +117,33 @@ func (f *Font) parseCmap(b []byte) error {
 			lk, err = parseCmap0(sub)
 			score = 1
 		case 2:
-			lk, err = parseCmap2(sub)
+			lk, err = parseCmap2(sub, bud)
 			score = 2
 		case 6:
-			lk, err = parseCmap6(sub)
+			lk, err = parseCmap6(sub, bud)
 			score = 3
 		case 4:
-			lk, err = parseCmap4(sub)
+			lk, err = parseCmap4(sub, bud)
 			score = 4
 		case 8:
-			lk, err = parseCmap8(sub)
+			lk, err = parseCmap8(sub, bud)
 			score = 5
 		case 10:
-			lk, err = parseCmap10(sub)
+			lk, err = parseCmap10(sub, bud)
 			score = 6
 		case 12:
-			lk, err = parseCmap12(sub)
+			lk, err = parseCmap12(sub, bud)
 			score = 7
 		case 13:
-			lk, err = parseCmap13(sub)
+			lk, err = parseCmap13(sub, bud)
 			score = 7
 		case 14:
-			vs, verr := parseCmap14(sub)
+			vs, verr := parseCmap14(sub, bud)
 			if verr != nil {
 				return verr
 			}
 			f.cmapVS = vs
+			done[offset] = decoded{}
 			continue
 		default:
 			continue
@@ -132,7 +151,9 @@ func (f *Font) parseCmap(b []byte) error {
 		if err != nil {
 			return err
 		}
+		done[offset] = decoded{lk: lk, score: score}
 		f.cmaps = append(f.cmaps, cmapSubtable{
+
 			platform: platform,
 			encoding: encoding,
 			format:   format,
@@ -162,12 +183,19 @@ type cmap4 struct {
 
 // parseCmap4 decodes a format-4 subtable from sub (which starts at the format
 // field).
-func parseCmap4(sub []byte) (cmapLookup, error) {
+func parseCmap4(sub []byte, given ...*allocBudget) (cmapLookup, error) {
+	bud := budgetFor(given, len(sub))
 	r := reader{b: sub}
 	r.skip(6) // format, length, language
 	segX2 := int(r.u16())
 	segCount := segX2 / 2
 	r.skip(6) // searchRange, entrySelector, rangeShift
+	// Four arrays of segCount 16-bit entries. The check is before the
+	// allocations: segCount is 15 bits, but there is one record per cmap
+	// subtable and they may share one offset.
+	if err := r.claim(bud, "cmap format 4", "segCount", uint64(segCount), 8); err != nil {
+		return nil, err
+	}
 	c := &cmap4{
 		segCount:      segCount,
 		endCode:       make([]uint16, segCount),
@@ -193,6 +221,9 @@ func parseCmap4(sub []byte) (cmapLookup, error) {
 	}
 	// The remaining bytes are the glyphIdArray (uint16 each).
 	rest := (len(sub) - r.pos) / 2
+	if err := bud.spend("cmap format 4", "glyphIdArray", uint64(rest), 2); err != nil {
+		return nil, err
+	}
 	c.glyphIDArray = make([]uint16, rest)
 	for i := 0; i < rest; i++ {
 		c.glyphIDArray[i] = r.u16()
@@ -273,21 +304,21 @@ type cmap12 struct {
 
 // parseCmap12 decodes a format-12 subtable from sub (starting at the format
 // field).
-func parseCmap12(sub []byte) (cmapLookup, error) {
+func parseCmap12(sub []byte, given ...*allocBudget) (cmapLookup, error) {
 	r := reader{b: sub}
 	r.skip(12) // format, reserved, length, language
-	numGroups := int(r.u32())
+	numGroups := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 12 header: %w", r.err)
 	}
+	if err := r.claim(budgetFor(given, len(sub)), "cmap format 12", "groups (numGroups)", uint64(numGroups), 12); err != nil {
+		return nil, err
+	}
 	c := &cmap12{groups: make([]cmap12group, numGroups)}
-	for i := 0; i < numGroups; i++ {
+	for i := 0; i < int(numGroups); i++ {
 		c.groups[i].start = r.u32()
 		c.groups[i].end = r.u32()
 		c.groups[i].startGID = r.u32()
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 12 groups: %w", r.err)
 	}
 	return c, nil
 }
@@ -347,21 +378,21 @@ type cmap13 struct {
 
 // parseCmap13 decodes a format-13 subtable from sub (starting at the format
 // field).
-func parseCmap13(sub []byte) (cmapLookup, error) {
+func parseCmap13(sub []byte, given ...*allocBudget) (cmapLookup, error) {
 	r := reader{b: sub}
 	r.skip(12) // format, reserved, length, language
-	numGroups := int(r.u32())
+	numGroups := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 13 header: %w", r.err)
 	}
+	if err := r.claim(budgetFor(given, len(sub)), "cmap format 13", "groups (numGroups)", uint64(numGroups), 12); err != nil {
+		return nil, err
+	}
 	c := &cmap13{groups: make([]cmap13group, numGroups)}
-	for i := 0; i < numGroups; i++ {
+	for i := 0; i < int(numGroups); i++ {
 		c.groups[i].start = r.u32()
 		c.groups[i].end = r.u32()
 		c.groups[i].glyphID = r.u32()
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 13 groups: %w", r.err)
 	}
 	return c, nil
 }
@@ -427,7 +458,7 @@ type cmap8 struct {
 
 // parseCmap8 decodes a format-8 subtable from sub (starting at the format
 // field).
-func parseCmap8(sub []byte) (cmapLookup, error) {
+func parseCmap8(sub []byte, given ...*allocBudget) (cmapLookup, error) {
 	r := reader{b: sub}
 	r.skip(12) // format, reserved, length, language
 	var c cmap8
@@ -437,18 +468,18 @@ func parseCmap8(sub []byte) (cmapLookup, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 8 is32: %w", r.err)
 	}
-	numGroups := int(r.u32())
+	numGroups := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 8 header: %w", r.err)
+	}
+	if err := r.claim(budgetFor(given, len(sub)), "cmap format 8", "groups (numGroups)", uint64(numGroups), 12); err != nil {
+		return nil, err
 	}
 	c.groups = make([]cmap8Group, numGroups)
 	for i := range c.groups {
 		c.groups[i].start = r.u32()
 		c.groups[i].end = r.u32()
 		c.groups[i].startGID = r.u32()
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 8 groups: %w", r.err)
 	}
 	return &c, nil
 }
@@ -547,7 +578,7 @@ type cmap6 struct {
 
 // parseCmap6 decodes a format-6 subtable from sub (starting at the format
 // field).
-func parseCmap6(sub []byte) (cmapLookup, error) {
+func parseCmap6(sub []byte, given ...*allocBudget) (cmapLookup, error) {
 	r := reader{b: sub}
 	r.skip(6) // format, length, language
 	firstCode := r.u16()
@@ -555,12 +586,12 @@ func parseCmap6(sub []byte) (cmapLookup, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 6 header: %w", r.err)
 	}
+	if err := r.claim(budgetFor(given, len(sub)), "cmap format 6", "entryCount", uint64(entryCount), 2); err != nil {
+		return nil, err
+	}
 	c := &cmap6{firstCode: firstCode, glyphIDArray: make([]uint16, entryCount)}
 	for i := range c.glyphIDArray {
 		c.glyphIDArray[i] = r.u16()
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 6: %w", r.err)
 	}
 	return c, nil
 }
@@ -607,20 +638,20 @@ type cmap10 struct {
 
 // parseCmap10 decodes a format-10 subtable from sub (starting at the format
 // field).
-func parseCmap10(sub []byte) (cmapLookup, error) {
+func parseCmap10(sub []byte, given ...*allocBudget) (cmapLookup, error) {
 	r := reader{b: sub}
 	r.skip(12) // format, reserved, length, language
 	startCharCode := r.u32()
-	numChars := int(r.u32())
+	numChars := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 10 header: %w", r.err)
+	}
+	if err := r.claim(budgetFor(given, len(sub)), "cmap format 10", "numChars", uint64(numChars), 2); err != nil {
+		return nil, err
 	}
 	c := &cmap10{startCharCode: startCharCode, glyphIDArray: make([]uint16, numChars)}
 	for i := range c.glyphIDArray {
 		c.glyphIDArray[i] = r.u16()
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 10: %w", r.err)
 	}
 	return c, nil
 }
@@ -686,7 +717,8 @@ type cmap2 struct {
 // field). The subtable has no explicit subHeader count; it is derived from
 // the highest offset referenced by subHeaderKeys, following the same
 // convention used by other OpenType/TrueType cmap format-2 parsers.
-func parseCmap2(sub []byte) (cmapLookup, error) {
+func parseCmap2(sub []byte, given ...*allocBudget) (cmapLookup, error) {
+	bud := budgetFor(given, len(sub))
 	r := reader{b: sub}
 	r.skip(6) // format, length, language
 	var c cmap2
@@ -706,6 +738,9 @@ func parseCmap2(sub []byte) (cmapLookup, error) {
 	numSubHeaders := int(maxKey)/8 + 1
 	glyphIndexArrayStart := r.pos + numSubHeaders*8
 
+	if err := r.claim(bud, "cmap format 2", "subheaders (subHeaders)", uint64(numSubHeaders), 8); err != nil {
+		return nil, err
+	}
 	c.subHeaders = make([]cmap2SubHeader, numSubHeaders)
 	for i := range c.subHeaders {
 		fieldPos := r.pos + 6 // firstCode(2)+entryCount(2)+idDelta(2) precede idRangeOffset
@@ -717,13 +752,13 @@ func parseCmap2(sub []byte) (cmapLookup, error) {
 			fieldOffset:   fieldPos - glyphIndexArrayStart,
 		}
 	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 2 subheaders: %w", r.err)
-	}
 
 	// The remaining bytes are the glyphIndexArray (uint16 each); rest is sized
 	// to whatever fits, so this run of reads never overruns.
 	rest := (len(sub) - r.pos) / 2
+	if err := bud.spend("cmap format 2", "glyphIndexArray", uint64(rest), 2); err != nil {
+		return nil, err
+	}
 	c.glyphIndexArray = make([]uint16, rest)
 	for i := range c.glyphIndexArray {
 		c.glyphIndexArray[i] = r.u16()
@@ -812,12 +847,20 @@ type cmap14 struct {
 
 // parseCmap14 decodes a format-14 subtable from sub (starting at the format
 // field).
-func parseCmap14(sub []byte) (*cmap14, error) {
+func parseCmap14(sub []byte, given ...*allocBudget) (*cmap14, error) {
+	bud := budgetFor(given, len(sub))
 	r := reader{b: sub}
 	r.skip(6) // format, length
-	numRecords := int(r.u32())
+	numRecords := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 14 header: %w", r.err)
+	}
+	// 11 bytes on disk per record; 12 B raw plus a 56 B decoded record in memory.
+	if err := r.room("cmap format 14", "records (numRecords)", uint64(numRecords), 11); err != nil {
+		return nil, err
+	}
+	if err := bud.spend("cmap format 14", "records (numRecords)", uint64(numRecords), 12+56); err != nil {
+		return nil, err
 	}
 
 	type rawRecord struct {
@@ -832,22 +875,19 @@ func parseCmap14(sub []byte) (*cmap14, error) {
 			nonDefaultOff: r.u32(),
 		}
 	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 14 records: %w", r.err)
-	}
 
 	c := &cmap14{records: make([]cmap14Record, numRecords)}
 	for i, raw := range raws {
 		c.records[i].varSelector = raw.varSelector
 		if raw.defaultOff != 0 {
-			ranges, err := parseUVSDefaultTable(sub, int(raw.defaultOff))
+			ranges, err := parseUVSDefaultTable(sub, int(raw.defaultOff), bud)
 			if err != nil {
 				return nil, err
 			}
 			c.records[i].defaultRanges = ranges
 		}
 		if raw.nonDefaultOff != 0 {
-			maps, err := parseUVSNonDefaultTable(sub, int(raw.nonDefaultOff))
+			maps, err := parseUVSNonDefaultTable(sub, int(raw.nonDefaultOff), bud)
 			if err != nil {
 				return nil, err
 			}
@@ -861,23 +901,23 @@ func parseCmap14(sub []byte) (*cmap14, error) {
 // sub (the format-14 subtable, offsets are subtable-relative). The offset
 // itself is only checked against sub's length here; a short read of the
 // table's own fields is reported separately by the reader below.
-func parseUVSDefaultTable(sub []byte, off int) ([]cmap14DefaultRange, error) {
-	if off > len(sub) {
+func parseUVSDefaultTable(sub []byte, off int, bud *allocBudget) ([]cmap14DefaultRange, error) {
+	if off > len(sub) || off < 0 {
 		return nil, fmt.Errorf("opentype: cmap format 14 default UVS offset: %w", errTruncated)
 	}
 	r := reader{b: sub[off:]}
-	numRanges := int(r.u32())
+	numRanges := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 14 default UVS header: %w", r.err)
+	}
+	if err := r.claim(bud, "cmap format 14", "default UVS ranges (numRanges)", uint64(numRanges), 4); err != nil {
+		return nil, err
 	}
 	ranges := make([]cmap14DefaultRange, numRanges)
 	for i := range ranges {
 		start := r.u24()
 		additionalCount := r.u8()
 		ranges[i] = cmap14DefaultRange{start: start, count: uint32(additionalCount) + 1}
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 14 default UVS ranges: %w", r.err)
 	}
 	return ranges, nil
 }
@@ -886,21 +926,21 @@ func parseUVSDefaultTable(sub []byte, off int) ([]cmap14DefaultRange, error) {
 // within sub (the format-14 subtable, offsets are subtable-relative). The
 // offset itself is only checked against sub's length here; a short read of
 // the table's own fields is reported separately by the reader below.
-func parseUVSNonDefaultTable(sub []byte, off int) ([]cmap14NonDefault, error) {
-	if off > len(sub) {
+func parseUVSNonDefaultTable(sub []byte, off int, bud *allocBudget) ([]cmap14NonDefault, error) {
+	if off > len(sub) || off < 0 {
 		return nil, fmt.Errorf("opentype: cmap format 14 non-default UVS offset: %w", errTruncated)
 	}
 	r := reader{b: sub[off:]}
-	numMappings := int(r.u32())
+	numMappings := r.u32()
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: cmap format 14 non-default UVS header: %w", r.err)
+	}
+	if err := r.claim(bud, "cmap format 14", "non-default UVS mappings (numMappings)", uint64(numMappings), 5); err != nil {
+		return nil, err
 	}
 	maps := make([]cmap14NonDefault, numMappings)
 	for i := range maps {
 		maps[i] = cmap14NonDefault{unicode: r.u24(), glyph: GlyphIndex(r.u16())}
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: cmap format 14 non-default UVS mappings: %w", r.err)
 	}
 	return maps, nil
 }

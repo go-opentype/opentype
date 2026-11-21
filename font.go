@@ -113,6 +113,21 @@ type Font struct {
 	// so callers can read table bytes (Font.Table/Font.TableTags) and the
 	// subsetting/instancing code can rebuild a container (subset.go, instance.go).
 	tables map[string][]byte
+
+	// bud is the allocation budget of the Parse that built the font: what the
+	// tables declared, charged against a bound tied to the input length (see
+	// bounds.go). It is kept so the measurement test can read what a real font
+	// spent; nothing reads it afterwards.
+	bud *allocBudget
+}
+
+// budget returns the allocation budget of the Parse in progress, or a fresh one
+// sized from the table at hand when a decoder is entered on its own.
+func (f *Font) budget(tableLen int) *allocBudget {
+	if f.bud != nil {
+		return f.bud
+	}
+	return newAllocBudget(tableLen)
 }
 
 // be16 reads a big-endian uint16 from b[0:2]; the caller guarantees len(b)>=2.
@@ -215,7 +230,7 @@ func Parse(b []byte) (*Font, error) {
 		}
 	}
 
-	f := &Font{tables: tables}
+	f := &Font{tables: tables, bud: newAllocBudget(len(b))}
 	if err := f.parseHead(tables["head"]); err != nil {
 		return nil, err
 	}

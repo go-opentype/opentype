@@ -114,10 +114,10 @@ func TestParseGDEF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGDEF: %v", err)
 	}
-	if gd.glyphClass[10] != gdefClassBase || gd.glyphClass[11] != gdefClassMark {
+	if gd.glyphClass.class(10) != gdefClassBase || gd.glyphClass.class(11) != gdefClassMark {
 		t.Errorf("glyphClass = %v", gd.glyphClass)
 	}
-	if gd.markAttach[11] != 1 {
+	if gd.markAttach.class(11) != 1 {
 		t.Errorf("markAttach = %v", gd.markAttach)
 	}
 	if !gd.markSetCovers(0, 11) || gd.markSetCovers(0, 10) || gd.markSetCovers(5, 11) {
@@ -130,7 +130,7 @@ func TestParseGDEF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGDEF minor0: %v", err)
 	}
-	if len(gd0.markAttach) != 0 || gd0.markGlyphSets != nil {
+	if gd0.markAttach.has(11) || gd0.markGlyphSets != nil {
 		t.Errorf("minor0 unexpected marks: %v %v", gd0.markAttach, gd0.markGlyphSets)
 	}
 
@@ -139,7 +139,7 @@ func TestParseGDEF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGDEF empty: %v", err)
 	}
-	if len(gdE.glyphClass) != 0 || len(gdE.markAttach) != 0 || gdE.markGlyphSets != nil {
+	if gdE.glyphClass.has(10) || gdE.markAttach.has(11) || gdE.markGlyphSets != nil {
 		t.Errorf("empty GDEF not empty: %+v", gdE)
 	}
 }
@@ -176,12 +176,12 @@ func TestParseGDEFErrors(t *testing.T) {
 
 func TestSkipper(t *testing.T) {
 	gd := &gdefTable{
-		glyphClass: map[GlyphIndex]int{
+		glyphClass: glyphMapFromMap(map[GlyphIndex]int{
 			1: gdefClassBase, 2: gdefClassLigature, 3: gdefClassMark,
 			4: gdefClassMark, 5: gdefClassMark,
-		},
-		markAttach:    map[GlyphIndex]int{3: 1, 4: 2, 5: 0},
-		markGlyphSets: []map[GlyphIndex]int{{4: 0}},
+		}),
+		markAttach:    glyphMapFromMap(map[GlyphIndex]int{3: 1, 4: 2, 5: 0}),
+		markGlyphSets: []*glyphMap{glyphMapFromMap(map[GlyphIndex]int{4: 0})},
 	}
 	// No GDEF: nothing is skipped.
 	if (skipper{}).skip(3) {
@@ -249,7 +249,7 @@ func TestGDEFThreadedThroughFont(t *testing.T) {
 	if f.gsub.gdef != f.gdef || f.gpos.gdef != f.gdef {
 		t.Error("GDEF not threaded into GSUB/GPOS")
 	}
-	if f.gdef.glyphClass[2] != gdefClassMark {
+	if f.gdef.glyphClass.class(2) != gdefClassMark {
 		t.Errorf("threaded GDEF class = %v", f.gdef.glyphClass)
 	}
 }
@@ -269,7 +269,7 @@ func gsubGDEF(t *testing.T, gd *gdefTable, flag, markSet, ltype uint16, subs [][
 }
 
 func TestGSUBLigatureIgnoreMarks(t *testing.T) {
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	// f(10) + i(11) -> fi(30); the mark 20 sits between them.
 	sub := buildLigatureSubst(buildCoverage1(10), [][]byte{
 		buildLigatureSet([][]byte{buildLigature(30, 11)}),
@@ -290,7 +290,7 @@ func TestGSUBLigatureIgnoreMarks(t *testing.T) {
 func TestGSUBLigatureTrackedClusters(t *testing.T) {
 	// The tracked path splices the parallel cluster slice across a ligature that
 	// skipped an intervening mark: fi keeps f's cluster, the mark keeps its own.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	sub := buildLigatureSubst(buildCoverage1(10), [][]byte{
 		buildLigatureSet([][]byte{buildLigature(30, 11)}),
 	})
@@ -312,7 +312,7 @@ func TestGSUBLigatureTrackedClusters(t *testing.T) {
 func TestGSUBSingleSkippedAnchor(t *testing.T) {
 	// A single substitution whose coverage includes a mark: with IgnoreMarks the
 	// mark is not a starting position, so it is left unchanged.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{20: gdefClassMark})}
 	sub := buildSingle1(5, buildCoverage1(20)) // 20 -> 25
 	if got := gsubGDEF(t, gd, flagIgnoreMarks, 0, 1, [][]byte{sub}, []GlyphIndex{20}); !reflect.DeepEqual(got, []GlyphIndex{20}) {
 		t.Errorf("single skipped = %v want [20]", got)
@@ -325,7 +325,7 @@ func TestGSUBSingleSkippedAnchor(t *testing.T) {
 func TestGSUBReverseSkip(t *testing.T) {
 	// Reverse chaining single sub: 10 -> 99 when followed by 11, with an ignored
 	// mark between. The reverse walk also skips the mark as a starting position.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	sub := buildReverseChain(buildCoverage1(10), nil, [][]byte{buildCoverage1(11)}, []GlyphIndex{99})
 	got := gsubGDEF(t, gd, flagIgnoreMarks, 0, 8, [][]byte{sub}, []GlyphIndex{10, 20, 11})
 	if want := []GlyphIndex{99, 20, 11}; !reflect.DeepEqual(got, want) {
@@ -337,7 +337,7 @@ func TestGSUBChainContextSkip(t *testing.T) {
 	// A chaining context (format 3) matching 10 with lookahead 11, applying a
 	// single substitution on the first glyph, only when the mark between is
 	// ignored. Lookup 0 is the chain; lookup 1 the nested single sub.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	chain := buildChain3(nil, [][]byte{buildCoverage1(10)}, [][]byte{buildCoverage1(11)}, []seqRec{{0, 1}})
 	nested := buildSingle1(5, buildCoverage1(10)) // 10 -> 15
 	lk0 := buildLookupFlagged(6, flagIgnoreMarks, 0, [][]byte{chain})
@@ -355,7 +355,7 @@ func TestGSUBChainContextSkip(t *testing.T) {
 func TestGSUBContextClassSkip(t *testing.T) {
 	// A class-based context (format 2) input [class-of-11] after covered 10, with
 	// an ignored mark in between, running a single sub on the first glyph.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	classDef := buildClassDef1(10, 1, 2) // glyph 10 -> class 1, glyph 11 -> class 2
 	rule := buildSeqRule([]uint16{2}, []seqRec{{0, 1}})
 	ctx := buildContext2(buildCoverage1(10), classDef, [][]byte{nil, buildRuleSet([][]byte{rule})})
@@ -409,8 +409,8 @@ func TestGSUBUseMarkFilteringSet(t *testing.T) {
 	// 0, so it is skipped as a starting position and not substituted; mark 21 is
 	// in the set and is substituted. This also drives the markFilteringSet parse.
 	gd := &gdefTable{
-		glyphClass:    map[GlyphIndex]int{20: gdefClassMark, 21: gdefClassMark},
-		markGlyphSets: []map[GlyphIndex]int{{21: 0}},
+		glyphClass:    glyphMapFromMap(map[GlyphIndex]int{20: gdefClassMark, 21: gdefClassMark}),
+		markGlyphSets: []*glyphMap{glyphMapFromMap(map[GlyphIndex]int{21: 0})},
 	}
 	sub := buildSingle1(5, buildCoverage1(20, 21)) // +5
 	got := gsubGDEF(t, gd, flagUseMarkFilteringSet, 0, 1, [][]byte{sub}, []GlyphIndex{20, 21})
@@ -430,7 +430,7 @@ func gposGDEF(t *testing.T, gd *gdefTable, lookups [][]byte) *gpos {
 }
 
 func TestGPOSPairIgnoreMarks(t *testing.T) {
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	pp := buildPairPos1(buildCoverage1(10), vfXAdvance, 0, [][]byte{
 		buildPairSet(vfXAdvance, 0, []pv{{second: 11, xa1: -40}}),
 	})
@@ -448,7 +448,7 @@ func TestGPOSPairIgnoreMarks(t *testing.T) {
 }
 
 func TestGPOSCursiveRTL(t *testing.T) {
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{40: gdefClassBase, 41: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{40: gdefClassBase, 41: gdefClassBase, 20: gdefClassMark})}
 	cur := buildCursivePos(buildCoverage1(40, 41), []eeRec{
 		{entry: nil, exit: buildAnchor1(100, 50)},
 		{entry: buildAnchor1(10, 20), exit: nil},
@@ -475,7 +475,7 @@ func TestGPOSCursiveRTL(t *testing.T) {
 
 func TestGPOSMarkBaseSkipsMarks(t *testing.T) {
 	// Mark-to-base base finding skips an intervening GDEF mark to reach the base.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 20: gdefClassMark, 21: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 20: gdefClassMark, 21: gdefClassMark})}
 	markArr := buildMarkArray([]markSpec{{class: 0, anchor: buildAnchor1(5, 7)}})
 	baseArr := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(3, 4)}})
 	st := buildMarkPosSubtable(buildCoverage1(21), buildCoverage1(10), 1, markArr, baseArr)
@@ -487,7 +487,7 @@ func TestGPOSMarkBaseSkipsMarks(t *testing.T) {
 }
 
 func TestGPOSMarkLigSkipsMarks(t *testing.T) {
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{30: gdefClassLigature, 20: gdefClassMark, 21: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{30: gdefClassLigature, 20: gdefClassMark, 21: gdefClassMark})}
 	markArr := buildMarkArray([]markSpec{{class: 0, anchor: buildAnchor1(5, 7)}})
 	ligAttach := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(3, 4)}})
 	ligArr := buildLigatureArray([][]byte{ligAttach})
@@ -502,7 +502,7 @@ func TestGPOSMarkLigSkipsMarks(t *testing.T) {
 func TestGPOSMarkMarkSkip(t *testing.T) {
 	// Mark-to-mark attaches 22 onto the preceding base mark 21, skipping a base
 	// glyph 10 that the IgnoreBaseGlyphs flag ignores.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{21: gdefClassMark, 22: gdefClassMark, 10: gdefClassBase}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{21: gdefClassMark, 22: gdefClassMark, 10: gdefClassBase})}
 	markArr := buildMarkArray([]markSpec{{class: 0, anchor: buildAnchor1(5, 7)}})
 	mark2Arr := buildAnchorMatrix(1, [][][]byte{{buildAnchor1(3, 4)}})
 	st := buildMarkPosSubtable(buildCoverage1(22), buildCoverage1(21), 1, markArr, mark2Arr)
@@ -518,7 +518,7 @@ func TestGPOSContextPos3Skip(t *testing.T) {
 	// Contextual positioning (format 3) input [10,11] with an ignored mark
 	// between, applying a single adjustment on the first glyph. A second record
 	// targets a sequence index past the matched input and is a no-op.
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	ctx := buildContextPos3([][]byte{buildCoverage1(10), buildCoverage1(11)}, []plr{{seq: 0, lookup: 1}, {seq: 9, lookup: 1}})
 	lk := buildLookupFlagged(7, flagIgnoreMarks, 0, [][]byte{ctx})
 	g := gposGDEF(t, gd, [][]byte{lk, singleAdvLookup(10, -30)})
@@ -531,7 +531,7 @@ func TestGPOSContextPos3Skip(t *testing.T) {
 func TestGPOSChainPos1BacktrackSkip(t *testing.T) {
 	// Chaining positioning (format 1) with a backtrack glyph that must be matched
 	// across an ignored mark (exercises the backward skip walk).
-	gd := &gdefTable{glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}}
+	gd := &gdefTable{glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark})}
 	rule := buildPosChainRule([]GlyphIndex{10}, nil, nil, []plr{{seq: 0, lookup: 1}})
 	chain := buildContextPos1(buildCoverage1(11), [][]byte{buildPosRuleSet([][]byte{rule})})
 	lk := buildLookupFlagged(8, flagIgnoreMarks, 0, [][]byte{chain})
@@ -549,8 +549,8 @@ func TestGPOSUseMarkFilteringSet(t *testing.T) {
 	// it is skipped and the pair 10..11 kerns. Also drives the markFilteringSet
 	// field in parseGPOSLookup.
 	gd := &gdefTable{
-		glyphClass:    map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark},
-		markGlyphSets: []map[GlyphIndex]int{{21: 0}},
+		glyphClass:    glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}),
+		markGlyphSets: []*glyphMap{glyphMapFromMap(map[GlyphIndex]int{21: 0})},
 	}
 	pp := buildPairPos1(buildCoverage1(10), vfXAdvance, 0, [][]byte{
 		buildPairSet(vfXAdvance, 0, []pv{{second: 11, xa1: -40}}),
@@ -584,8 +584,8 @@ func TestGPOSMarkAttachType(t *testing.T) {
 	// MarkAttachmentType filtering: a pair kern skips a mark whose attachment
 	// class differs from the type in the flag's high byte.
 	gd := &gdefTable{
-		glyphClass: map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark},
-		markAttach: map[GlyphIndex]int{20: 1},
+		glyphClass: glyphMapFromMap(map[GlyphIndex]int{10: gdefClassBase, 11: gdefClassBase, 20: gdefClassMark}),
+		markAttach: glyphMapFromMap(map[GlyphIndex]int{20: 1}),
 	}
 	pp := buildPairPos1(buildCoverage1(10), vfXAdvance, 0, [][]byte{
 		buildPairSet(vfXAdvance, 0, []pv{{second: 11, xa1: -40}}),

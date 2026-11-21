@@ -109,6 +109,9 @@ func parseScriptList(b []byte) ([]scriptRecord, error) {
 		tag string
 		off int
 	}
+	if err := r.room("scriptList", "scriptCount", uint64(count), 6); err != nil {
+		return nil, err
+	}
 	recs := make([]rec, count)
 	for i := 0; i < count; i++ {
 		recs[i].tag = r.tag()
@@ -118,10 +121,18 @@ func parseScriptList(b []byte) ([]scriptRecord, error) {
 		return nil, fmt.Errorf("opentype: scriptList: %w", r.err)
 	}
 	out := make([]scriptRecord, count)
+	// Records may share one Script table: decode each distinct offset once, so
+	// 65535 records pointing at one Script cost one Script (issue #75).
+	seen := map[int]scriptRecord{}
 	for i, rc := range recs {
-		sc, err := parseScript(subslice(b, rc.off))
-		if err != nil {
-			return nil, err
+		sc, ok := seen[rc.off]
+		if !ok {
+			var err error
+			sc, err = parseScript(subslice(b, rc.off))
+			if err != nil {
+				return nil, err
+			}
+			seen[rc.off] = sc
 		}
 		sc.tag = rc.tag
 		out[i] = sc
@@ -137,6 +148,9 @@ func parseScript(b []byte) (scriptRecord, error) {
 	type lr struct {
 		tag string
 		off int
+	}
+	if err := r.room("script", "langSysCount", uint64(langCount), 6); err != nil {
+		return scriptRecord{}, err
 	}
 	lrs := make([]lr, langCount)
 	for i := 0; i < langCount; i++ {
@@ -155,10 +169,16 @@ func parseScript(b []byte) (scriptRecord, error) {
 		sc.defaultLang = ls
 	}
 	sc.langs = make([]langSysRecord, langCount)
+	seen := map[int]*langSys{} // records may share one LangSys
 	for i, l := range lrs {
-		ls, err := parseLangSys(subslice(b, l.off))
-		if err != nil {
-			return scriptRecord{}, err
+		ls, ok := seen[l.off]
+		if !ok {
+			var err error
+			ls, err = parseLangSys(subslice(b, l.off))
+			if err != nil {
+				return scriptRecord{}, err
+			}
+			seen[l.off] = ls
 		}
 		sc.langs[i] = langSysRecord{tag: l.tag, ls: ls}
 	}
@@ -171,6 +191,9 @@ func parseLangSys(b []byte) (*langSys, error) {
 	r.skip(2) // lookupOrderOffset (reserved, always 0)
 	required := r.u16()
 	n := int(r.u16())
+	if err := r.room("langSys", "featureIndexCount", uint64(n), 2); err != nil {
+		return nil, err
+	}
 	feats := make([]uint16, n)
 	for i := 0; i < n; i++ {
 		feats[i] = r.u16()
@@ -189,6 +212,9 @@ func parseFeatureList(b []byte) ([]featureRecord, error) {
 		tag string
 		off int
 	}
+	if err := r.room("featureList", "featureCount", uint64(count), 6); err != nil {
+		return nil, err
+	}
 	recs := make([]rec, count)
 	for i := 0; i < count; i++ {
 		recs[i].tag = r.tag()
@@ -198,10 +224,16 @@ func parseFeatureList(b []byte) ([]featureRecord, error) {
 		return nil, fmt.Errorf("opentype: featureList: %w", r.err)
 	}
 	out := make([]featureRecord, count)
+	seen := map[int]featureRecord{} // records may share one Feature table
 	for i, rc := range recs {
-		fr, err := parseFeature(subslice(b, rc.off))
-		if err != nil {
-			return nil, err
+		fr, ok := seen[rc.off]
+		if !ok {
+			var err error
+			fr, err = parseFeature(subslice(b, rc.off))
+			if err != nil {
+				return nil, err
+			}
+			seen[rc.off] = fr
 		}
 		fr.tag = rc.tag
 		out[i] = fr
@@ -214,6 +246,9 @@ func parseFeature(b []byte) (featureRecord, error) {
 	r := reader{b: b}
 	r.skip(2) // featureParamsOffset (unused here)
 	n := int(r.u16())
+	if err := r.room("feature", "lookupIndexCount", uint64(n), 2); err != nil {
+		return featureRecord{}, err
+	}
 	idx := make([]uint16, n)
 	for i := 0; i < n; i++ {
 		idx[i] = r.u16()
@@ -229,6 +264,9 @@ func parseFeature(b []byte) (featureRecord, error) {
 func parseLookupList(b []byte) ([][]byte, error) {
 	r := reader{b: b}
 	count := int(r.u16())
+	if err := r.room("lookupList", "lookupCount", uint64(count), 2); err != nil {
+		return nil, err
+	}
 	offs := make([]int, count)
 	for i := 0; i < count; i++ {
 		offs[i] = int(r.u16())
@@ -236,74 +274,12 @@ func parseLookupList(b []byte) ([][]byte, error) {
 	if r.err != nil {
 		return nil, fmt.Errorf("opentype: lookupList: %w", r.err)
 	}
+
 	out := make([][]byte, count)
 	for i, off := range offs {
 		out[i] = subslice(b, off)
 	}
 	return out, nil
-}
-
-// parseCoverage decodes a Coverage table (format 1 or 2) into a map from glyph
-// to its coverage index.
-func parseCoverage(b []byte) (map[GlyphIndex]int, error) {
-	r := reader{b: b}
-	format := r.u16()
-	m := map[GlyphIndex]int{}
-	switch format {
-	case 1:
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			m[GlyphIndex(r.u16())] = i
-		}
-	case 2:
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			start := int(r.u16())
-			end := int(r.u16())
-			startCov := int(r.u16())
-			for g := start; g <= end; g++ {
-				m[GlyphIndex(g)] = startCov + (g - start)
-			}
-		}
-	default:
-		return nil, fmt.Errorf("opentype: coverage format %d", format)
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: coverage: %w", r.err)
-	}
-	return m, nil
-}
-
-// parseClassDef decodes a ClassDef table (format 1 or 2) into a map from glyph
-// to class. Glyphs absent from the map belong to class 0.
-func parseClassDef(b []byte) (map[GlyphIndex]int, error) {
-	r := reader{b: b}
-	format := r.u16()
-	m := map[GlyphIndex]int{}
-	switch format {
-	case 1:
-		start := int(r.u16())
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			m[GlyphIndex(start+i)] = int(r.u16())
-		}
-	case 2:
-		n := int(r.u16())
-		for i := 0; i < n; i++ {
-			s := int(r.u16())
-			e := int(r.u16())
-			c := int(r.u16())
-			for g := s; g <= e; g++ {
-				m[GlyphIndex(g)] = c
-			}
-		}
-	default:
-		return nil, fmt.Errorf("opentype: classdef format %d", format)
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: classdef: %w", r.err)
-	}
-	return m, nil
 }
 
 // findScript resolves a script tag, falling back to "DFLT" and then to the

@@ -6,6 +6,7 @@ package opentype
 
 import (
 	"fmt"
+	"math/bits"
 	"sort"
 )
 
@@ -140,8 +141,11 @@ func parseGPOS(b []byte) (*gpos, error) {
 		return nil, err
 	}
 	lookups := make([]gposLookup, len(raw))
+	// Lookups may share one table; every table ends where the LookupList does,
+	// so its length identifies its offset.
+	memo := map[int]gposLookup{}
 	for i, lk := range raw {
-		gl, err := parseGPOSLookup(lk)
+		gl, err := memoOnce(memo, len(lk), func() (gposLookup, error) { return parseGPOSLookup(lk) })
 		if err != nil {
 			return nil, err
 		}
@@ -156,6 +160,9 @@ func parseGPOSLookup(b []byte) (gposLookup, error) {
 	lookupType := r.u16()
 	flag := r.u16()
 	subCount := int(r.u16())
+	if !r.has(uint64(subCount), 2) {
+		r.err, subCount = errTruncated, 0 // the count promises more than the table holds
+	}
 	offs := make([]int, subCount)
 	for i := 0; i < subCount; i++ {
 		offs[i] = int(r.u16())
@@ -168,8 +175,11 @@ func parseGPOSLookup(b []byte) (gposLookup, error) {
 		return gposLookup{}, fmt.Errorf("opentype: gpos lookup: %w", r.err)
 	}
 	var subs []posSubtable
+	memo := map[int]posSubtable{}
 	for _, off := range offs {
-		st, err := parseGPOSSubtable(lookupType, subslice(b, off))
+		st, err := memoOnce(memo, off, func() (posSubtable, error) {
+			return parseGPOSSubtable(lookupType, subslice(b, off))
+		})
 		if err != nil {
 			return gposLookup{}, err
 		}
@@ -319,13 +329,13 @@ func parseMarkArray(b []byte) ([]markRecord, error) {
 
 // singlePos1 applies one ValueRecord to every covered glyph.
 type singlePos1 struct {
-	cov map[GlyphIndex]int
+	cov *glyphMap
 	val valueRecord
 }
 
 // singlePos2 applies a per-glyph ValueRecord indexed by coverage index.
 type singlePos2 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	vals []valueRecord
 }
 
@@ -366,7 +376,7 @@ func parseSinglePos(b []byte) (posSubtable, error) {
 }
 
 func (s *singlePos1) apply(ctx *posContext, i int) bool {
-	if _, ok := s.cov[ctx.glyphs[i]]; !ok {
+	if _, ok := s.cov.get(ctx.glyphs[i]); !ok {
 		return false
 	}
 	ctx.positions[i].addValue(s.val)
@@ -374,7 +384,7 @@ func (s *singlePos1) apply(ctx *posContext, i int) bool {
 }
 
 func (s *singlePos2) apply(ctx *posContext, i int) bool {
-	ci, ok := s.cov[ctx.glyphs[i]]
+	ci, ok := s.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -404,7 +414,7 @@ func parsePairPosAny(b []byte) (posSubtable, error) {
 // pairPos1 is a pair-adjustment format 1 subtable: covered first glyphs index
 // into per-glyph maps from second glyph to X-advance adjustment.
 type pairPos1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets []map[GlyphIndex]int
 }
 
@@ -416,6 +426,9 @@ func parsePairPos1(b []byte) (pairPos, error) {
 	vf1 := r.u16()
 	vf2 := r.u16()
 	setCount := int(r.u16())
+	if !r.has(uint64(setCount), 2) {
+		r.err, setCount = errTruncated, 0 // the count promises more than the table holds
+	}
 	setOffs := make([]int, setCount)
 	for i := 0; i < setCount; i++ {
 		setOffs[i] = int(r.u16())
@@ -428,8 +441,11 @@ func parsePairPos1(b []byte) (pairPos, error) {
 		return nil, err
 	}
 	sets := make([]map[GlyphIndex]int, setCount)
+	memo := map[int]map[GlyphIndex]int{}
 	for i, so := range setOffs {
-		m, err := parsePairSet(subslice(b, so), vf1, vf2)
+		m, err := memoOnce(memo, so, func() (map[GlyphIndex]int, error) {
+			return parsePairSet(subslice(b, so), vf1, vf2)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -443,6 +459,9 @@ func parsePairSet(b []byte, vf1, vf2 uint16) (map[GlyphIndex]int, error) {
 	r := reader{b: b}
 	count := int(r.u16())
 	m := map[GlyphIndex]int{}
+	if !r.has(uint64(count), 2) {
+		r.err, count = errTruncated, 0 // each pair is at least its second glyph
+	}
 	for i := 0; i < count; i++ {
 		second := GlyphIndex(r.u16())
 		v1 := readValueRecord(&r, vf1)
@@ -456,7 +475,7 @@ func parsePairSet(b []byte, vf1, vf2 uint16) (map[GlyphIndex]int, error) {
 }
 
 func (p *pairPos1) kern(left, right GlyphIndex) (int, bool) {
-	ci, ok := p.cov[left]
+	ci, ok := p.cov.get(left)
 	if !ok {
 		return 0, false
 	}
@@ -483,8 +502,8 @@ func (p *pairPos1) apply(ctx *posContext, i int) bool {
 // covered, then both glyphs are classified and the class pair indexes a grid of
 // X-advance adjustments.
 type pairPos2 struct {
-	cov         map[GlyphIndex]int
-	cd1, cd2    map[GlyphIndex]int
+	cov         *glyphMap
+	cd1, cd2    *glyphMap
 	class2Count int
 	grid        []int
 }
@@ -500,7 +519,19 @@ func parsePairPos2(b []byte) (pairPos, error) {
 	cd2Off := int(r.u16())
 	class1Count := int(r.u16())
 	class2Count := int(r.u16())
-	grid := make([]int, class1Count*class2Count)
+	// class1Count*class2Count is up to 2^32 cells and, when both value formats
+	// are empty, no byte backs any of them. Without bytes there is nothing to
+	// read and no kerning to keep, so no grid is built; with bytes, the cells
+	// must fit in the table, checked by division so 32-bit builds cannot wrap.
+	cellSize := 2 * (bits.OnesCount16(vf1&0xFF) + bits.OnesCount16(vf2&0xFF))
+	var grid []int
+	if cellSize > 0 {
+		if !r.has(uint64(class1Count)*uint64(class2Count), cellSize) {
+			return nil, fmt.Errorf("opentype: pairpos2 class1Count %d x class2Count %d cells of %d bytes: %w",
+				class1Count, class2Count, cellSize, errDeclaredCount)
+		}
+		grid = make([]int, class1Count*class2Count)
+	}
 	for i := range grid {
 		v1 := readValueRecord(&r, vf1)
 		readValueRecord(&r, vf2)
@@ -525,10 +556,10 @@ func parsePairPos2(b []byte) (pairPos, error) {
 }
 
 func (p *pairPos2) kern(left, right GlyphIndex) (int, bool) {
-	if _, ok := p.cov[left]; !ok {
+	if _, ok := p.cov.get(left); !ok {
 		return 0, false
 	}
-	idx := p.cd1[left]*p.class2Count + p.cd2[right]
+	idx := p.cd1.class(left)*p.class2Count + p.cd2.class(right)
 	if idx >= len(p.grid) {
 		return 0, false
 	}
@@ -554,7 +585,7 @@ func (p *pairPos2) apply(ctx *posContext, i int) bool {
 // next glyph's entry anchor. entry[i] and exit[i] are indexed by coverage index
 // and may be nil (NULL anchor).
 type cursivePos struct {
-	cov   map[GlyphIndex]int
+	cov   *glyphMap
 	entry []*anchor
 	exit  []*anchor
 }
@@ -566,6 +597,9 @@ func parseCursivePos(b []byte) (posSubtable, error) {
 	covOff := int(r.u16())
 	n := int(r.u16())
 	entryOffs := make([]int, n)
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	exitOffs := make([]int, n)
 	for i := 0; i < n; i++ {
 		entryOffs[i] = int(r.u16())
@@ -592,7 +626,7 @@ func parseCursivePos(b []byte) (posSubtable, error) {
 }
 
 func (c *cursivePos) apply(ctx *posContext, i int) bool {
-	ci, ok := c.cov[ctx.glyphs[i]]
+	ci, ok := c.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -600,7 +634,7 @@ func (c *cursivePos) apply(ctx *posContext, i int) bool {
 	if j >= len(ctx.glyphs) {
 		return false
 	}
-	ni, ok := c.cov[ctx.glyphs[j]]
+	ni, ok := c.cov.get(ctx.glyphs[j])
 	if !ok {
 		return false
 	}
@@ -645,8 +679,8 @@ func (ctx *posContext) attachMark(base, mark int, baseAnchor, markAnchor anchor)
 // markBasePos is a mark-to-base (type 4) subtable: base[baseIndex][markClass]
 // gives the base attachment anchor for each mark class.
 type markBasePos struct {
-	markCov map[GlyphIndex]int
-	baseCov map[GlyphIndex]int
+	markCov *glyphMap
+	baseCov *glyphMap
 	marks   []markRecord
 	base    [][]*anchor
 }
@@ -683,7 +717,7 @@ func parseMarkBasePos(b []byte) (posSubtable, error) {
 }
 
 func (m *markBasePos) apply(ctx *posContext, i int) bool {
-	mi, ok := m.markCov[ctx.glyphs[i]]
+	mi, ok := m.markCov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -697,7 +731,7 @@ func (m *markBasePos) apply(ctx *posContext, i int) bool {
 		if ctx.skip.skip(ctx.glyphs[b]) || ctx.skip.isMark(ctx.glyphs[b]) {
 			continue
 		}
-		bi, ok := m.baseCov[ctx.glyphs[b]]
+		bi, ok := m.baseCov.get(ctx.glyphs[b])
 		if !ok {
 			continue
 		}
@@ -719,8 +753,8 @@ func (m *markBasePos) apply(ctx *posContext, i int) bool {
 // GSUB ligature-component tracking the caller does not provide) is simplified
 // to the first component.
 type markLigPos struct {
-	markCov map[GlyphIndex]int
-	ligCov  map[GlyphIndex]int
+	markCov *glyphMap
+	ligCov  *glyphMap
 	marks   []markRecord
 	ligs    [][][]*anchor
 }
@@ -762,6 +796,9 @@ func parseMarkLigPos(b []byte) (posSubtable, error) {
 func parseLigatureArray(b []byte, cols int) ([][][]*anchor, error) {
 	r := reader{b: b}
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	offs := make([]int, n)
 	for i := 0; i < n; i++ {
 		offs[i] = int(r.u16())
@@ -781,7 +818,7 @@ func parseLigatureArray(b []byte, cols int) ([][][]*anchor, error) {
 }
 
 func (m *markLigPos) apply(ctx *posContext, i int) bool {
-	mi, ok := m.markCov[ctx.glyphs[i]]
+	mi, ok := m.markCov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -794,7 +831,7 @@ func (m *markLigPos) apply(ctx *posContext, i int) bool {
 		if ctx.skip.skip(ctx.glyphs[b]) || ctx.skip.isMark(ctx.glyphs[b]) {
 			continue
 		}
-		li, ok := m.ligCov[ctx.glyphs[b]]
+		li, ok := m.ligCov.get(ctx.glyphs[b])
 		if !ok {
 			continue
 		}
@@ -818,8 +855,8 @@ func (m *markLigPos) apply(ctx *posContext, i int) bool {
 // markMarkPos is a mark-to-mark (type 6) subtable: mark2[mark2Index][markClass]
 // gives the base-mark attachment anchor.
 type markMarkPos struct {
-	mark1Cov map[GlyphIndex]int
-	mark2Cov map[GlyphIndex]int
+	mark1Cov *glyphMap
+	mark2Cov *glyphMap
 	marks    []markRecord
 	mark2    [][]*anchor
 }
@@ -856,7 +893,7 @@ func parseMarkMarkPos(b []byte) (posSubtable, error) {
 }
 
 func (m *markMarkPos) apply(ctx *posContext, i int) bool {
-	mi, ok := m.mark1Cov[ctx.glyphs[i]]
+	mi, ok := m.mark1Cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -870,7 +907,7 @@ func (m *markMarkPos) apply(ctx *posContext, i int) bool {
 		if ctx.skip.skip(ctx.glyphs[b]) {
 			continue
 		}
-		bi, ok := m.mark2Cov[ctx.glyphs[b]]
+		bi, ok := m.mark2Cov.get(ctx.glyphs[b])
 		if !ok {
 			continue
 		}
@@ -898,7 +935,11 @@ type posLookupRecord struct {
 
 // readPosLookupRecords reads n PosLookupRecords.
 func readPosLookupRecords(r *reader, n int) []posLookupRecord {
+	if !r.has(uint64(n), 4) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	recs := make([]posLookupRecord, n)
+
 	for i := range recs {
 		recs[i].seqIndex = r.u16()
 		recs[i].lookupIndex = r.u16()
@@ -920,7 +961,7 @@ func glyphPredsG(seq []GlyphIndex) []glyphPred {
 // classPredsG builds class-equality predicates from a GlyphIndex class sequence
 // (stored with the on-disk class values of a Pos(Chain)ClassRule) and a
 // ClassDef map; glyphs absent from cd fall in class 0.
-func classPredsG(seq []GlyphIndex, cd map[GlyphIndex]int) []glyphPred {
+func classPredsG(seq []GlyphIndex, cd *glyphMap) []glyphPred {
 	preds := make([]glyphPred, len(seq))
 	for k := range seq {
 		v := int(seq[k])
@@ -938,7 +979,7 @@ type posRule struct {
 
 // contextPos1 is a contextual positioning format 1 subtable.
 type contextPos1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]posRule
 }
 
@@ -947,15 +988,15 @@ type contextPos1 struct {
 // sets is indexed by the first glyph's class; a nil set is empty (a NULL
 // PosClassSet offset, common for class 0).
 type contextPos2 struct {
-	cov      map[GlyphIndex]int
-	classDef map[GlyphIndex]int
+	cov      *glyphMap
+	classDef *glyphMap
 	sets     [][]posRule
 }
 
 // contextPos3 is a contextual positioning format 3 subtable: a per-position
 // coverage sequence and the lookup records to run on a full match.
 type contextPos3 struct {
-	covs []map[GlyphIndex]int
+	covs []*glyphMap
 	recs []posLookupRecord
 }
 
@@ -985,6 +1026,9 @@ func parseContextPos2(b []byte) (posSubtable, error) {
 	covOff := int(r.u16())
 	classOff := int(r.u16())
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	setOffs := make([]int, n)
 	for i := 0; i < n; i++ {
 		setOffs[i] = int(r.u16())
@@ -1001,11 +1045,12 @@ func parseContextPos2(b []byte) (posSubtable, error) {
 		return nil, err
 	}
 	sets := make([][]posRule, n)
+	memo := map[int][]posRule{}
 	for i, so := range setOffs {
 		if so == 0 {
 			continue // NULL PosClassSet: this class triggers no rule
 		}
-		rs, err := parsePosRuleSet(subslice(b, so))
+		rs, err := memoOnce(memo, so, func() ([]posRule, error) { return parsePosRuleSet(subslice(b, so)) })
 		if err != nil {
 			return nil, err
 		}
@@ -1015,7 +1060,7 @@ func parseContextPos2(b []byte) (posSubtable, error) {
 }
 
 func (c *contextPos2) apply(ctx *posContext, i int) bool {
-	if _, ok := c.cov[ctx.glyphs[i]]; !ok {
+	if _, ok := c.cov.get(ctx.glyphs[i]); !ok {
 		return false
 	}
 	cls := classOf(c.classDef, ctx.glyphs[i])
@@ -1039,6 +1084,9 @@ func parseContextPos1(b []byte) (posSubtable, error) {
 	r.skip(2) // posFormat
 	covOff := int(r.u16())
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	setOffs := make([]int, n)
 	for i := 0; i < n; i++ {
 		setOffs[i] = int(r.u16())
@@ -1051,8 +1099,9 @@ func parseContextPos1(b []byte) (posSubtable, error) {
 		return nil, err
 	}
 	sets := make([][]posRule, n)
+	memo := map[int][]posRule{}
 	for i, so := range setOffs {
-		rs, err := parsePosRuleSet(subslice(b, so))
+		rs, err := memoOnce(memo, so, func() ([]posRule, error) { return parsePosRuleSet(subslice(b, so)) })
 		if err != nil {
 			return nil, err
 		}
@@ -1065,6 +1114,9 @@ func parseContextPos1(b []byte) (posSubtable, error) {
 func parsePosRuleSet(b []byte) ([]posRule, error) {
 	r := reader{b: b}
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	offs := make([]int, n)
 	for i := 0; i < n; i++ {
 		offs[i] = int(r.u16())
@@ -1073,8 +1125,9 @@ func parsePosRuleSet(b []byte) ([]posRule, error) {
 		return nil, fmt.Errorf("opentype: posRuleSet: %w", r.err)
 	}
 	rules := make([]posRule, n)
+	memo := map[int]posRule{}
 	for i, off := range offs {
-		rule, err := parsePosRule(subslice(b, off))
+		rule, err := memoOnce(memo, off, func() (posRule, error) { return parsePosRule(subslice(b, off)) })
 		if err != nil {
 			return nil, err
 		}
@@ -1100,7 +1153,7 @@ func parsePosRule(b []byte) (posRule, error) {
 }
 
 func (c *contextPos1) apply(ctx *posContext, i int) bool {
-	ci, ok := c.cov[ctx.glyphs[i]]
+	ci, ok := c.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}
@@ -1124,6 +1177,9 @@ func parseContextPos3(b []byte) (posSubtable, error) {
 	r.skip(2) // posFormat
 	glyphCount := int(r.u16())
 	lookupCount := int(r.u16())
+	if !r.has(uint64(glyphCount), 2) {
+		r.err, glyphCount = errTruncated, 0 // the count promises more than the table holds
+	}
 	covOffs := make([]int, glyphCount)
 	for i := 0; i < glyphCount; i++ {
 		covOffs[i] = int(r.u16())
@@ -1150,8 +1206,8 @@ func (c *contextPos3) apply(ctx *posContext, i int) bool {
 
 // parsePosCoverageList decodes a slice of Coverage tables at the given offsets from
 // the start of b.
-func parsePosCoverageList(b []byte, offs []int) ([]map[GlyphIndex]int, error) {
-	covs := make([]map[GlyphIndex]int, len(offs))
+func parsePosCoverageList(b []byte, offs []int) ([]*glyphMap, error) {
+	covs := make([]*glyphMap, len(offs))
 	for i, off := range offs {
 		cov, err := parseCoverage(subslice(b, off))
 		if err != nil {
@@ -1172,7 +1228,7 @@ type posChainRule struct {
 
 // chainPos1 is a chaining contextual positioning format 1 subtable.
 type chainPos1 struct {
-	cov  map[GlyphIndex]int
+	cov  *glyphMap
 	sets [][]posChainRule
 }
 
@@ -1181,18 +1237,18 @@ type chainPos1 struct {
 // rules match by class sequence. sets is indexed by the first glyph's input
 // class; a nil set is empty (a NULL ChainPosClassSet offset).
 type chainPos2 struct {
-	cov       map[GlyphIndex]int
-	backtrack map[GlyphIndex]int
-	input     map[GlyphIndex]int
-	lookahead map[GlyphIndex]int
+	cov       *glyphMap
+	backtrack *glyphMap
+	input     *glyphMap
+	lookahead *glyphMap
 	sets      [][]posChainRule
 }
 
 // chainPos3 is a chaining contextual positioning format 3 subtable.
 type chainPos3 struct {
-	back  []map[GlyphIndex]int
-	input []map[GlyphIndex]int
-	ahead []map[GlyphIndex]int
+	back  []*glyphMap
+	input []*glyphMap
+	ahead []*glyphMap
 	recs  []posLookupRecord
 }
 
@@ -1225,6 +1281,9 @@ func parseChainPos2(b []byte) (posSubtable, error) {
 	inOff := int(r.u16())
 	laOff := int(r.u16())
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	setOffs := make([]int, n)
 	for i := 0; i < n; i++ {
 		setOffs[i] = int(r.u16())
@@ -1263,7 +1322,7 @@ func parseChainPos2(b []byte) (posSubtable, error) {
 }
 
 func (c *chainPos2) apply(ctx *posContext, i int) bool {
-	if _, ok := c.cov[ctx.glyphs[i]]; !ok {
+	if _, ok := c.cov.get(ctx.glyphs[i]); !ok {
 		return false
 	}
 	cls := classOf(c.input, ctx.glyphs[i])
@@ -1291,6 +1350,9 @@ func parseChainPos1(b []byte) (posSubtable, error) {
 	r.skip(2) // posFormat
 	covOff := int(r.u16())
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	setOffs := make([]int, n)
 	for i := 0; i < n; i++ {
 		setOffs[i] = int(r.u16())
@@ -1303,8 +1365,9 @@ func parseChainPos1(b []byte) (posSubtable, error) {
 		return nil, err
 	}
 	sets := make([][]posChainRule, n)
+	memo := map[int][]posChainRule{}
 	for i, so := range setOffs {
-		rs, err := parsePosChainRuleSet(subslice(b, so))
+		rs, err := memoOnce(memo, so, func() ([]posChainRule, error) { return parsePosChainRuleSet(subslice(b, so)) })
 		if err != nil {
 			return nil, err
 		}
@@ -1317,6 +1380,9 @@ func parseChainPos1(b []byte) (posSubtable, error) {
 func parsePosChainRuleSet(b []byte) ([]posChainRule, error) {
 	r := reader{b: b}
 	n := int(r.u16())
+	if !r.has(uint64(n), 2) {
+		r.err, n = errTruncated, 0 // the count promises more than the table holds
+	}
 	offs := make([]int, n)
 	for i := 0; i < n; i++ {
 		offs[i] = int(r.u16())
@@ -1325,8 +1391,9 @@ func parsePosChainRuleSet(b []byte) ([]posChainRule, error) {
 		return nil, fmt.Errorf("opentype: chainRuleSet: %w", r.err)
 	}
 	rules := make([]posChainRule, n)
+	memo := map[int]posChainRule{}
 	for i, off := range offs {
-		rule, err := parsePosChainRule(subslice(b, off))
+		rule, err := memoOnce(memo, off, func() (posChainRule, error) { return parsePosChainRule(subslice(b, off)) })
 		if err != nil {
 			return nil, err
 		}
@@ -1362,7 +1429,7 @@ func parsePosChainRule(b []byte) (posChainRule, error) {
 }
 
 func (c *chainPos1) apply(ctx *posContext, i int) bool {
-	ci, ok := c.cov[ctx.glyphs[i]]
+	ci, ok := c.cov.get(ctx.glyphs[i])
 	if !ok {
 		return false
 	}

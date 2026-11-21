@@ -1,0 +1,3 @@
+# Tests read testdata back byte for byte (fuzz seeds, goldens, fonts): a
+# Windows checkout must not rewrite their line endings.
+testdata/** -text

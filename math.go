@@ -160,14 +160,14 @@ type mathTable struct {
 	constants    [mathConstCount]int32 // design-unit or percent scalars, indexed by MathConstant
 	hasConstants bool
 
-	italicCorr    map[GlyphIndex]int32 // MathItalicsCorrectionInfo: per-glyph italic correction
-	topAccent     map[GlyphIndex]int32 // MathTopAccentAttachment: per-glyph top-accent x
-	extendedShape map[GlyphIndex]int   // ExtendedShapeCoverage, used as a set
-	kern          map[GlyphIndex]*mathKernRecord
+	italicCorr    covValues[int32] // MathItalicsCorrectionInfo: per-glyph italic correction
+	topAccent     covValues[int32] // MathTopAccentAttachment: per-glyph top-accent x
+	extendedShape *glyphMap        // ExtendedShapeCoverage, used as a set
+	kern          covValues[*mathKernRecord]
 
 	minConnectorOverlap int32
-	vertConstruct       map[GlyphIndex]*mathGlyphConstruction // vertical (tall) stretch
-	horizConstruct      map[GlyphIndex]*mathGlyphConstruction // horizontal (wide) stretch
+	vertConstruct       covValues[*mathGlyphConstruction] // vertical (tall) stretch
+	horizConstruct      covValues[*mathGlyphConstruction] // horizontal (wide) stretch
 }
 
 // mathKernRecord holds a glyph's four corner MathKerns (any may be nil).
@@ -340,42 +340,36 @@ func (m *mathTable) parseGlyphInfo(b []byte) error {
 // parsePerGlyphValues decodes the shape shared by MathItalicsCorrectionInfo and
 // MathTopAccentAttachment: a Coverage offset, a count and that many MathValue
 // records, joined into a per-glyph map.
-func parsePerGlyphValues(b []byte) (map[GlyphIndex]int32, error) {
+func parsePerGlyphValues(b []byte) (covValues[int32], error) {
 	r := reader{b: b}
 	covOff := int(r.u16())
 	count := int(r.u16())
+	if err := r.room("MATH per-glyph values", "count", uint64(count), 4); err != nil {
+		return covValues[int32]{}, err
+	}
 	vals := make([]int32, count)
 	for i := range vals {
 		vals[i] = r.mathValue()
 	}
 	if r.err != nil {
-		return nil, fmt.Errorf("opentype: MATH per-glyph values: %w", r.err)
+		return covValues[int32]{}, fmt.Errorf("opentype: MATH per-glyph values: %w", r.err)
 	}
 	cov, err := parseCoverage(subslice(b, covOff))
 	if err != nil {
-		return nil, err
+		return covValues[int32]{}, err
 	}
-	return coverageValues(cov, vals), nil
-}
-
-// coverageValues joins a Coverage (glyph→index) with a parallel value slice into
-// a glyph→value map.
-func coverageValues(cov map[GlyphIndex]int, vals []int32) map[GlyphIndex]int32 {
-	out := make(map[GlyphIndex]int32, len(cov))
-	for g, i := range cov {
-		if i < len(vals) {
-			out[g] = vals[i]
-		}
-	}
-	return out
+	return covValues[int32]{cov: cov, vals: vals}, nil
 }
 
 // parseMathKernInfo decodes the MathKernInfo table: a Coverage plus one
 // MathKernInfoRecord (four corner offsets) per covered glyph.
-func parseMathKernInfo(b []byte) (map[GlyphIndex]*mathKernRecord, error) {
+func parseMathKernInfo(b []byte) (covValues[*mathKernRecord], error) {
 	r := reader{b: b}
 	covOff := int(r.u16())
 	count := int(r.u16())
+	if err := r.room("MATH kernInfo", "mathKernCount", uint64(count), 8); err != nil {
+		return covValues[*mathKernRecord]{}, err
+	}
 	offs := make([][4]int, count)
 	for i := range offs {
 		for c := 0; c < 4; c++ {
@@ -383,18 +377,22 @@ func parseMathKernInfo(b []byte) (map[GlyphIndex]*mathKernRecord, error) {
 		}
 	}
 	if r.err != nil {
-		return nil, fmt.Errorf("opentype: MATH kernInfo: %w", r.err)
+		return covValues[*mathKernRecord]{}, fmt.Errorf("opentype: MATH kernInfo: %w", r.err)
 	}
 	recs := make([]*mathKernRecord, count)
+	// The corner offsets of every record may all name one MathKern: decode each
+	// distinct offset once (issue #75).
+	kerns := map[int]*mathKern{}
 	for i := range offs {
 		rec := &mathKernRecord{}
 		for c := 0; c < 4; c++ {
 			if offs[i][c] == 0 {
 				continue // this corner has no math kern
 			}
-			k, err := parseMathKern(subslice(b, offs[i][c]))
+			off := offs[i][c]
+			k, err := memoOnce(kerns, off, func() (*mathKern, error) { return parseMathKern(subslice(b, off)) })
 			if err != nil {
-				return nil, err
+				return covValues[*mathKernRecord]{}, err
 			}
 			rec.corners[c] = k
 		}
@@ -402,15 +400,9 @@ func parseMathKernInfo(b []byte) (map[GlyphIndex]*mathKernRecord, error) {
 	}
 	cov, err := parseCoverage(subslice(b, covOff))
 	if err != nil {
-		return nil, err
+		return covValues[*mathKernRecord]{}, err
 	}
-	out := make(map[GlyphIndex]*mathKernRecord, len(cov))
-	for g, i := range cov {
-		if i < len(recs) {
-			out[g] = recs[i]
-		}
-	}
-	return out, nil
+	return covValues[*mathKernRecord]{cov: cov, vals: recs}, nil
 }
 
 // parseMathKern decodes a MathKern subtable: heightCount correction heights and
@@ -418,6 +410,9 @@ func parseMathKernInfo(b []byte) (map[GlyphIndex]*mathKernRecord, error) {
 func parseMathKern(b []byte) (*mathKern, error) {
 	r := reader{b: b}
 	n := int(r.u16())
+	if err := r.room("MATH kern", "heightCount", uint64(2*n+1), 4); err != nil {
+		return nil, err
+	}
 	heights := make([]int32, n)
 	for i := range heights {
 		heights[i] = r.mathValue()
@@ -425,9 +420,6 @@ func parseMathKern(b []byte) (*mathKern, error) {
 	kerns := make([]int32, n+1)
 	for i := range kerns {
 		kerns[i] = r.mathValue()
-	}
-	if r.err != nil {
-		return nil, fmt.Errorf("opentype: MATH kern: %w", r.err)
 	}
 	return &mathKern{heights: heights, kerns: kerns}, nil
 }
@@ -441,6 +433,9 @@ func (m *mathTable) parseVariants(b []byte) error {
 	horizCovOff := int(r.u16())
 	vertCount := int(r.u16())
 	horizCount := int(r.u16())
+	if err := r.room("MATH variants", "vertGlyphCount+horizGlyphCount", uint64(vertCount)+uint64(horizCount), 2); err != nil {
+		return err
+	}
 	vertOffs := make([]int, vertCount)
 	for i := range vertOffs {
 		vertOffs[i] = int(r.u16())
@@ -468,29 +463,24 @@ func (m *mathTable) parseVariants(b []byte) error {
 // buildConstructions decodes each MathGlyphConstruction at offs and keys them by
 // the glyphs in the Coverage at covOff. A zero covOff (an empty axis) yields an
 // empty map without touching the coverage bytes.
-func buildConstructions(b []byte, covOff int, offs []int) (map[GlyphIndex]*mathGlyphConstruction, error) {
-	out := map[GlyphIndex]*mathGlyphConstruction{}
+func buildConstructions(b []byte, covOff int, offs []int) (covValues[*mathGlyphConstruction], error) {
 	if covOff == 0 {
-		return out, nil
+		return covValues[*mathGlyphConstruction]{}, nil
 	}
 	constructs := make([]*mathGlyphConstruction, len(offs))
+	memo := map[int]*mathGlyphConstruction{} // offsets may all name one construction
 	for i, off := range offs {
-		gc, err := parseGlyphConstruction(subslice(b, off))
+		gc, err := memoOnce(memo, off, func() (*mathGlyphConstruction, error) { return parseGlyphConstruction(subslice(b, off)) })
 		if err != nil {
-			return nil, err
+			return covValues[*mathGlyphConstruction]{}, err
 		}
 		constructs[i] = gc
 	}
 	cov, err := parseCoverage(subslice(b, covOff))
 	if err != nil {
-		return nil, err
+		return covValues[*mathGlyphConstruction]{}, err
 	}
-	for g, i := range cov {
-		if i < len(constructs) {
-			out[g] = constructs[i]
-		}
-	}
-	return out, nil
+	return covValues[*mathGlyphConstruction]{cov: cov, vals: constructs}, nil
 }
 
 // parseGlyphConstruction decodes a MathGlyphConstruction: an optional
@@ -499,6 +489,9 @@ func parseGlyphConstruction(b []byte) (*mathGlyphConstruction, error) {
 	r := reader{b: b}
 	asmOff := int(r.u16())
 	variantCount := int(r.u16())
+	if err := r.room("MATH glyph construction", "variantCount", uint64(variantCount), 4); err != nil {
+		return nil, err
+	}
 	variants := make([]mathVariantRecord, variantCount)
 	for i := range variants {
 		variants[i].glyph = GlyphIndex(r.u16())
@@ -524,7 +517,11 @@ func parseGlyphAssembly(b []byte) (*mathAssemblyData, error) {
 	r := reader{b: b}
 	italic := r.mathValue()
 	partCount := int(r.u16())
+	if err := r.room("MATH glyph assembly", "partCount", uint64(partCount), 10); err != nil {
+		return nil, err
+	}
 	parts := make([]mathPart, partCount)
+
 	for i := range parts {
 		parts[i].glyph = GlyphIndex(r.u16())
 		parts[i].startConnector = int32(r.u16())
@@ -552,7 +549,7 @@ func (f *Font) IsExtendedShapeGlyph(gid GlyphIndex) bool {
 	if f.math == nil {
 		return false
 	}
-	_, ok := f.math.extendedShape[gid]
+	_, ok := f.math.extendedShape.get(gid)
 	return ok
 }
 
@@ -625,7 +622,7 @@ func (fc *Face) ItalicCorrection(gid GlyphIndex) int {
 	if m == nil {
 		return 0
 	}
-	return fc.scaleUnit(m.italicCorr[gid])
+	return fc.scaleUnit(m.italicCorr.val(gid))
 }
 
 // ItalicCorrectionUnits is ItalicCorrection without the rounding.
@@ -641,7 +638,7 @@ func (fc *Face) ItalicCorrectionUnits(gid GlyphIndex) float64 {
 	if m == nil {
 		return 0
 	}
-	return fc.scaleUnitF(m.italicCorr[gid])
+	return fc.scaleUnitF(m.italicCorr.val(gid))
 }
 
 // TopAccentAttachment returns the x position (in pixels from the glyph origin)
@@ -653,7 +650,7 @@ func (fc *Face) TopAccentAttachment(gid GlyphIndex) (int, bool) {
 	if m == nil {
 		return 0, false
 	}
-	v, ok := m.topAccent[gid]
+	v, ok := m.topAccent.get(gid)
 	if !ok {
 		return 0, false
 	}
@@ -668,7 +665,7 @@ func (fc *Face) TopAccentAttachmentUnits(gid GlyphIndex) (float64, bool) {
 	if m == nil {
 		return 0, false
 	}
-	v, ok := m.topAccent[gid]
+	v, ok := m.topAccent.get(gid)
 	if !ok {
 		return 0, false
 	}
@@ -684,7 +681,7 @@ func (fc *Face) MathKern(gid GlyphIndex, corner MathKernCorner, correctionHeight
 	if m == nil {
 		return 0
 	}
-	rec := m.kern[gid]
+	rec := m.kern.val(gid)
 	if rec == nil {
 		return 0
 	}
@@ -712,7 +709,7 @@ func (fc *Face) MathKernUnits(gid GlyphIndex, corner MathKernCorner, correctionH
 	if m == nil {
 		return 0
 	}
-	rec := m.kern[gid]
+	rec := m.kern.val(gid)
 	if rec == nil {
 		return 0
 	}
@@ -749,7 +746,7 @@ func (fc *Face) MathVariants(gid GlyphIndex, vertical bool) ([]MathVariant, *Mat
 	if vertical {
 		table = m.vertConstruct
 	}
-	gc := table[gid]
+	gc := table.val(gid)
 	if gc == nil {
 		return nil, nil
 	}

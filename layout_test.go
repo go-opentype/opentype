@@ -254,7 +254,7 @@ func TestParseCoverageFormats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("coverage1: %v", err)
 	}
-	if m1[10] != 0 || m1[20] != 1 || m1[30] != 2 {
+	if m1.class(10) != 0 || m1.class(20) != 1 || m1.class(30) != 2 {
 		t.Errorf("coverage1 indices = %v", m1)
 	}
 	// Format 2.
@@ -262,7 +262,7 @@ func TestParseCoverageFormats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("coverage2: %v", err)
 	}
-	if m2[5] != 0 || m2[6] != 1 || m2[7] != 2 || m2[100] != 3 {
+	if m2.class(5) != 0 || m2.class(6) != 1 || m2.class(7) != 2 || m2.class(100) != 3 {
 		t.Errorf("coverage2 indices = %v", m2)
 	}
 }
@@ -281,14 +281,14 @@ func TestParseClassDefFormats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("classdef1: %v", err)
 	}
-	if c1[10] != 1 || c1[11] != 2 || c1[12] != 0 || c1[99] != 0 {
+	if c1.class(10) != 1 || c1.class(11) != 2 || c1.class(12) != 0 || c1.class(99) != 0 {
 		t.Errorf("classdef1 = %v", c1)
 	}
 	c2, err := parseClassDef(buildClassDef2([3]int{5, 6, 3}, [3]int{20, 20, 7}))
 	if err != nil {
 		t.Fatalf("classdef2: %v", err)
 	}
-	if c2[5] != 3 || c2[6] != 3 || c2[20] != 7 {
+	if c2.class(5) != 3 || c2.class(6) != 3 || c2.class(20) != 7 {
 		t.Errorf("classdef2 = %v", c2)
 	}
 }
