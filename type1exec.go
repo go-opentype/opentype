@@ -94,15 +94,26 @@ type t1machine struct {
 	flexPts   []outlinePoint
 	seacDepth int
 	done      bool
+	box       ctrlBox // control box, control points included (controlbox.go)
 }
 
 // outline draws a glyph of a Type 1 program.
 func (t *type1Font) outline(gid int) ([]contour, error) {
+	m, err := t.runGlyph(gid)
+	if err != nil {
+		return nil, err
+	}
+	return m.contours, nil
+}
+
+// runGlyph draws glyph gid and returns the finished interpreter: its outline
+// and its control box.
+func (t *type1Font) runGlyph(gid int) (*t1machine, error) {
 	name, ok := t.glyphName(gid)
 	if !ok {
 		return nil, fmt.Errorf("opentype: type1: glyph index %d out of range", gid)
 	}
-	return t.outlineByName(name, 0)
+	return t.runBudgeted(name, 0, &t1budget{})
 }
 
 // outlineByName draws the glyph a name stands for.
@@ -112,6 +123,16 @@ func (t *type1Font) outlineByName(name string, seacDepth int) ([]contour, error)
 
 // outlineBudgeted draws a glyph against a budget its accent components share.
 func (t *type1Font) outlineBudgeted(name string, seacDepth int, b *t1budget) ([]contour, error) {
+	m, err := t.runBudgeted(name, seacDepth, b)
+	if err != nil {
+		return nil, err
+	}
+	return m.contours, nil
+}
+
+// runBudgeted draws a glyph against a budget and returns the finished
+// interpreter: its outline and its control box.
+func (t *type1Font) runBudgeted(name string, seacDepth int, b *t1budget) (*t1machine, error) {
 	cs, ok := t.charstrings[name]
 	if !ok {
 		return nil, fmt.Errorf("opentype: type1: no glyph called %q", name)
@@ -121,7 +142,7 @@ func (t *type1Font) outlineBudgeted(name string, seacDepth int, b *t1budget) ([]
 		return nil, err
 	}
 	m.finishContour()
-	return m.contours, nil
+	return m, nil
 }
 
 // type1Width reads what a charstring says its glyph is wide, which is the
@@ -444,18 +465,21 @@ func (m *t1machine) seac() error {
 	}
 	asb, adx, ady, bchar, achar := s[0], s[1], s[2], int(s[3]), int(s[4])
 	m.clear()
-	base, err := m.component(bchar)
+	bm, err := m.component(bchar)
 	if err != nil {
 		return err
 	}
-	accent, err := m.component(achar)
+	am, err := m.component(achar)
 	if err != nil {
 		return err
 	}
+	base, accent := bm.contours, am.contours
 	m.finishContour()
 	m.contours = append(m.contours, base...)
 	// The accent is placed relative to the base's own left side bearing.
 	dx, dy := m.sbx-asb+adx, ady
+	m.box.union(bm.box, 0, 0)
+	m.box.union(am.box, dx, dy)
 	for _, c := range accent {
 		nc := make(contour, len(c))
 		for i, p := range c {
@@ -468,13 +492,13 @@ func (m *t1machine) seac() error {
 }
 
 // component draws one half of an accented glyph, named by a Standard Encoding
-// code.
-func (m *t1machine) component(code int) ([]contour, error) {
+// code, and returns the interpreter that drew it.
+func (m *t1machine) component(code int) (*t1machine, error) {
 	sid, ok := standardEncodingSID(code)
 	if !ok || int(sid) >= nStdStrings {
 		return nil, fmt.Errorf("opentype: type1: code %d is not in the standard encoding", code)
 	}
-	return m.f.outlineBudgeted(cffStandardStrings[sid], m.seacDepth+1, m.budget)
+	return m.f.runBudgeted(cffStandardStrings[sid], m.seacDepth+1, m.budget)
 }
 
 // clear empties the operand stack, which every operator that consumes one does.
@@ -497,6 +521,8 @@ func (m *t1machine) moveTo(dx, dy float64) {
 func (m *t1machine) lineTo(dx, dy float64) {
 	m.x += dx
 	m.y += dy
+	m.box.startSegment(m.cur)
+	m.box.add(m.x, m.y)
 	m.cur = append(m.cur, outlinePoint{x: m.x, y: m.y, on: true})
 	m.budget.npts++
 }
@@ -510,6 +536,10 @@ func (m *t1machine) rrcurveTo(dx1, dy1, dx2, dy2, dx3, dy3 float64) {
 
 // curveTo flattens a cubic curve into the on-curve points a contour is made of.
 func (m *t1machine) curveTo(x1, y1, x2, y2, x3, y3 float64) {
+	m.box.startSegment(m.cur)
+	m.box.add(x1, y1)
+	m.box.add(x2, y2)
+	m.box.add(x3, y3)
 	x0, y0 := m.x, m.y
 	for k := 1; k <= cffCurveSteps; k++ {
 		t := float64(k) / float64(cffCurveSteps)

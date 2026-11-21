@@ -572,9 +572,10 @@ type t2machine struct {
 	nStems    int
 	widthDone bool
 	done      bool
-	seacDepth int // endchar-seac accent-composition recursion depth
-	ops       int // operators executed so far, subroutines included (maxT2Ops)
-	npts      int // outline points emitted so far (maxT2Points)
+	seacDepth int     // endchar-seac accent-composition recursion depth
+	ops       int     // operators executed so far, subroutines included (maxT2Ops)
+	npts      int     // outline points emitted so far (maxT2Points)
+	box       ctrlBox // control box, control points included (controlbox.go)
 
 	// Hinting data recorded during interpretation for the grid-fitter (cffhint.go):
 	// the resolved stem-edge positions in font units (in declaration order, which
@@ -681,13 +682,20 @@ func (m *t2machine) moveTo(dx, dy float64) {
 func (m *t2machine) lineTo(dx, dy float64) {
 	m.x += dx
 	m.y += dy
+	m.box.startSegment(m.cur)
+	m.box.add(m.x, m.y)
 	m.cur = append(m.cur, outlinePoint{x: m.x, y: m.y, on: true})
 	m.npts++
 }
 
 // curveTo flattens a cubic Bézier from the pen position through control points
 // (x1,y1),(x2,y2) to the endpoint (x3,y3), appending on-curve sample points.
+// The control points are not kept in the contour, so the box records them.
 func (m *t2machine) curveTo(x1, y1, x2, y2, x3, y3 float64) {
+	m.box.startSegment(m.cur)
+	m.box.add(x1, y1)
+	m.box.add(x2, y2)
+	m.box.add(x3, y3)
 	x0, y0 := m.x, m.y
 	for k := 1; k <= cffCurveSteps; k++ {
 		t := float64(k) / float64(cffCurveSteps)
@@ -1171,14 +1179,17 @@ func (m *t2machine) seac() error {
 	n := len(m.stack)
 	adx, ady := m.stack[n-4], m.stack[n-3]
 	bchar, achar := int(m.stack[n-2]), int(m.stack[n-1])
-	base, err := m.c.seacComponent(bchar, m.seacDepth+1)
+	bm, err := m.c.seacComponent(bchar, m.seacDepth+1)
 	if err != nil {
 		return err
 	}
-	accent, err := m.c.seacComponent(achar, m.seacDepth+1)
+	am, err := m.c.seacComponent(achar, m.seacDepth+1)
 	if err != nil {
 		return err
 	}
+	base, accent := bm.contours, am.contours
+	m.box.union(bm.box, 0, 0)
+	m.box.union(am.box, adx, ady)
 	m.finishContour()
 	m.contours = append(m.contours, base...)
 	for _, cont := range accent {
@@ -1193,8 +1204,9 @@ func (m *t2machine) seac() error {
 }
 
 // seacComponent resolves a Standard Encoding code to a glyph id (via the
-// standard encoding and the CFF charset) and returns that glyph's outline.
-func (c *cffTable) seacComponent(code, seacDepth int) ([]contour, error) {
+// standard encoding and the CFF charset) and returns the interpreter that drew
+// it, whose outline and control box the seac composes.
+func (c *cffTable) seacComponent(code, seacDepth int) (*t2machine, error) {
 	sid, ok := standardEncodingSID(code)
 	if !ok {
 		return nil, fmt.Errorf("opentype: cff seac: code %d not in standard encoding", code)
@@ -1203,7 +1215,7 @@ func (c *cffTable) seacComponent(code, seacDepth int) ([]contour, error) {
 	if !ok {
 		return nil, fmt.Errorf("opentype: cff seac: no glyph for string id %d", sid)
 	}
-	return c.outlineSeac(gid, seacDepth)
+	return c.runGlyph(gid, seacDepth)
 }
 
 // standardEncodingSID maps a Standard Encoding character code to its CFF
