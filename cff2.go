@@ -467,9 +467,15 @@ func (c *cff2Table) outline(gid int, coords []int16) ([]contour, error) {
 // activation and the glyph's Font-DICT Private-DICT hint parameters) that
 // cffhint.go's grid-fitter consumes. The outline is still instanced at coords.
 func (c *cff2Table) outlineHints(gid int, coords []int16) ([]contour, *cffGlyphHints, error) {
+	cs, gh, _, err := c.outlineHintsCost(gid, coords)
+	return cs, gh, err
+}
+
+// outlineHintsCost is outlineHints plus the glyph's cost, see [t2machine.cost].
+func (c *cff2Table) outlineHintsCost(gid int, coords []int16) ([]contour, *cffGlyphHints, int, error) {
 	m, err := c.runGlyph(gid, coords)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	fd := 0
 	if c.fdSelect != nil {
@@ -482,7 +488,7 @@ func (c *cff2Table) outlineHints(gid int, coords []int16) ([]contour, *cffGlyphH
 		flexRanges: m.tm.flexRanges,
 		priv:       c.privHints[fd],
 	}
-	return m.tm.contours, gh, nil
+	return m.tm.contours, gh, m.tm.cost(), nil
 }
 
 // runGlyph interprets glyph gid's CFF2 charstring at coords and returns the

@@ -376,30 +376,44 @@ func (fc *Face) GlyphMaskIndex(gid GlyphIndex, x, y int) (bounds image.Rectangle
 // SetHinting affects all three outline flavours; with hinting off they are
 // returned unhinted.
 func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
+	cs, _, err := fc.outlineWork(gid, false)
+	return cs, err
+}
+
+// outlineCost is outline plus the work the outline took, in the unit of its
+// kind (see [Face.GlyphCost]); the glyph is interpreted once.
+func (fc *Face) outlineCost(gid GlyphIndex) ([]contour, int, error) {
+	return fc.outlineWork(gid, true)
+}
+
+// outlineWork is the one body of both. The charstring kinds count as they run;
+// a glyf glyph's points are read from its headers only when withCost asks, so
+// the rendering path does not pay for a number it drops.
+func (fc *Face) outlineWork(gid GlyphIndex, withCost bool) ([]contour, int, error) {
 	if fc.font.t1 != nil {
 		// A Type 1 program carries hints of its own, in a form nothing here
 		// grid-fits; its outlines are drawn as they were written.
-		return fc.font.t1.outline(int(gid))
+		return fc.font.t1.outlineCost(int(gid))
 	}
 	if fc.font.cff2 != nil {
-		contours, gh, err := fc.font.cff2.outlineHints(int(gid), fc.font.NormalizeCoords(fc.varCoords))
+		contours, gh, cost, err := fc.font.cff2.outlineHintsCost(int(gid), fc.font.NormalizeCoords(fc.varCoords))
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if fc.hinting {
 			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx), fc.stemDarken)
 		}
-		return contours, nil
+		return contours, cost, nil
 	}
 	if fc.font.cff != nil {
-		contours, gh, err := fc.font.cff.outlineHints(int(gid))
+		contours, gh, cost, err := fc.font.cff.outlineHintsCost(int(gid))
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if fc.hinting {
 			contours = cffGridFit(contours, gh, fc.scale, float64(fc.sizePx), fc.stemDarken)
 		}
-		return contours, nil
+		return contours, cost, nil
 	}
 	var (
 		contours []contour
@@ -411,12 +425,16 @@ func (fc *Face) outline(gid GlyphIndex) ([]contour, error) {
 		contours, err = fc.font.glyphContours(gid)
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if fc.hinting {
 		contours = fc.hintedOutline(gid, contours)
 	}
-	return contours, nil
+	cost := 0
+	if withCost {
+		cost = fc.font.glyfPoints(gid)
+	}
+	return contours, cost, nil
 }
 
 // SetVariation instances the font at the user-space axis coordinates coords
