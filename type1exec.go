@@ -99,11 +99,18 @@ type t1machine struct {
 
 // outline draws a glyph of a Type 1 program.
 func (t *type1Font) outline(gid int) ([]contour, error) {
+	cs, _, err := t.outlineCost(gid)
+	return cs, err
+}
+
+// outlineCost is outline plus the glyph's cost: the operators executed, the
+// seac components' included, which share the glyph's budget.
+func (t *type1Font) outlineCost(gid int) ([]contour, int, error) {
 	m, err := t.runGlyph(gid)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return m.contours, nil
+	return m.contours, m.budget.ops, nil
 }
 
 // runGlyph draws glyph gid and returns the finished interpreter: its outline

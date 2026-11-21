@@ -142,7 +142,15 @@ const maxGlyphPoints = 65535
 
 // errGlyphBudget is wrapped into the error of a glyph that exceeds
 // maxGlyphPoints.
-var errGlyphBudget = errors.New("glyph exceeds its per-glyph point budget")
+var errGlyphBudget error = budgetError("glyph exceeds its per-glyph point budget")
+
+// glyfPoints is the number of points glyph gid expands to (a contour counting
+// at least one), as the budget of maxGlyphPoints counts them, read from the
+// glyph headers alone.
+func (f *Font) glyfPoints(gid GlyphIndex) int {
+	n, _ := f.glyphCost(gid, gid, 0, map[GlyphIndex]int{})
+	return n
+}
 
 // checkGlyphBudget counts, without building anything, the points glyph root
 // will expand to and refuses it past maxGlyphPoints. It only judges the budget:

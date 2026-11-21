@@ -117,7 +117,23 @@ const maxT2Points = 1 << 16
 
 // errT2Budget is returned, wrapped with the font kind, when a glyph exceeds
 // maxT2Ops or maxT2Points.
-var errT2Budget = errors.New("charstring exceeds its per-glyph budget")
+var errT2Budget error = budgetError("charstring exceeds its per-glyph budget")
+
+// ErrOutlineBudget is what a glyph's refusal wraps when the glyph exceeds the
+// per-glyph budget of its outline: more than 131,072 operators or 65,536 points
+// in a CFF, CFF2 or Type 1 charstring, more than 65,535 points in a composite
+// glyf glyph. [Face.GlyphCost], [Face.GlyphOutlineCost] and
+// [Face.GlyphSVGPathCost] report it; test for it with [errors.Is].
+var ErrOutlineBudget = errors.New("glyph outline exceeds its per-glyph budget")
+
+// budgetError is a per-glyph budget refusal that keeps its own message and is
+// also [ErrOutlineBudget].
+type budgetError string
+
+func (e budgetError) Error() string { return string(e) }
+
+// Is makes every per-glyph budget refusal match ErrOutlineBudget.
+func (e budgetError) Is(target error) bool { return target == ErrOutlineBudget }
 
 // spend charges one operator against the glyph's budgets. kind is "cff" or
 // "cff2" and only names the table in the error.
@@ -574,6 +590,7 @@ type t2machine struct {
 	done      bool
 	seacDepth int     // endchar-seac accent-composition recursion depth
 	ops       int     // operators executed so far, subroutines included (maxT2Ops)
+	seacOps   int     // operators the seac components executed, reported by cost only
 	npts      int     // outline points emitted so far (maxT2Points)
 	box       ctrlBox // control box, control points included (controlbox.go)
 
@@ -623,9 +640,15 @@ func (c *cffTable) outlineSeac(gid, seacDepth int) ([]contour, error) {
 // hinting data (recorded stems, per-hintmask activation and the font's parsed
 // Private-DICT hint parameters) that cffhint.go's grid-fitter consumes.
 func (c *cffTable) outlineHints(gid int) ([]contour, *cffGlyphHints, error) {
+	cs, gh, _, err := c.outlineHintsCost(gid)
+	return cs, gh, err
+}
+
+// outlineHintsCost is outlineHints plus the glyph's cost, see [t2machine.cost].
+func (c *cffTable) outlineHintsCost(gid int) ([]contour, *cffGlyphHints, int, error) {
 	m, err := c.runGlyph(gid, 0)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	return m.contours, &cffGlyphHints{
 		stems:      m.stemHints,
@@ -633,8 +656,13 @@ func (c *cffTable) outlineHints(gid int) ([]contour, *cffGlyphHints, error) {
 		cntrGroups: m.cntrGroups,
 		flexRanges: m.flexRanges,
 		priv:       c.priv,
-	}, nil
+	}, m.cost(), nil
 }
+
+// cost is the number of operators the glyph executed: its own, the
+// subroutines' it called, and the seac components' (each of them a glyph run
+// in a machine of its own, whose count the budget of maxT2Ops does not pool).
+func (m *t2machine) cost() int { return m.ops + m.seacOps }
 
 // push appends v to the operand stack, guarding the stack-depth limit.
 func (m *t2machine) push(v float64) error {
@@ -1187,6 +1215,7 @@ func (m *t2machine) seac() error {
 	if err != nil {
 		return err
 	}
+	m.seacOps += bm.cost() + am.cost()
 	base, accent := bm.contours, am.contours
 	m.box.union(bm.box, 0, 0)
 	m.box.union(am.box, adx, ady)

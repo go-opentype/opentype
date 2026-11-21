@@ -54,6 +54,64 @@ func (fc *Face) GlyphOutline(gid GlyphIndex) (segs []Segment, ok bool) {
 	return segs, true
 }
 
+// GlyphCost is the work outlining glyph gid takes, so that a caller can bound a
+// whole font deterministically: sum the costs of its glyphs and refuse the font
+// past a total of its own. It is stateless: nothing is stored on the Font or
+// the Face, and a cost is a property of the glyph, not of the order the glyphs
+// were asked in.
+//
+// The unit depends on the outline kind:
+//   - CFF, CFF2 and Type 1: the charstring operators executed, those of the
+//     subroutines it calls and of the seac components it composes included.
+//     Operands are not counted. A glyph is limited to 131,072 operators.
+//   - glyf (TrueType): the points the glyph expands to, a composite's
+//     components included, a contour counting at least one. A glyph is limited
+//     to 65,535 points. The TrueType instructions run when hinting is on are
+//     not counted; they have a budget of their own of 1,000,000 per glyph.
+//
+// The units are not comparable across kinds; a caller bounds each kind by its
+// own total.
+//
+// Measured on the machine's fonts, the busiest glyph and the total over all
+// glyphs: STIX Two Math (CFF, 6,760 glyphs): 1,267 operators for the busiest
+// glyph, 166,885 in all (TestGlyphCostSTIXTwoMath), against the 131,072 one
+// glyph may take. Over the 227 fonts of the development machine, STIX Two Math
+// has the largest charstring total and its busiest glyph is the busiest of the
+// charstring fonts; the glyf fonts reach 4,103 points for the busiest glyph
+// (Kokonor) and 3,554,977 in all (Arial Unicode, 50,377 glyphs).
+//
+// err is the refusal of a glyph that [Face.GlyphOutline] reports as not ok: it
+// wraps [ErrOutlineBudget] when the glyph exceeds its budget, and is another
+// error for a glyph out of range or corrupt. A valid but empty glyph costs 0.
+func (fc *Face) GlyphCost(gid GlyphIndex) (cost int, err error) {
+	_, cost, err = fc.outlineCost(gid)
+	return cost, err
+}
+
+// GlyphOutlineCost is [Face.GlyphOutline] together with the [Face.GlyphCost]
+// of the glyph, from the one interpretation: a caller that bounds a font while
+// it draws it does not outline twice. On error segs is nil and cost is 0.
+func (fc *Face) GlyphOutlineCost(gid GlyphIndex) (segs []Segment, cost int, err error) {
+	cs, cost, err := fc.outlineCost(gid)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, c := range cs {
+		segs = appendContour(segs, c)
+	}
+	return segs, cost, nil
+}
+
+// GlyphSVGPathCost is [Face.GlyphSVGPath] together with the [Face.GlyphCost] of
+// the glyph, from the one interpretation. On error d is "" and cost is 0.
+func (fc *Face) GlyphSVGPathCost(gid GlyphIndex) (d string, cost int, err error) {
+	segs, cost, err := fc.GlyphOutlineCost(gid)
+	if err != nil {
+		return "", 0, err
+	}
+	return segmentsToSVG(segs, fc.scale), cost, nil
+}
+
 // mid returns the midpoint of a and b.
 func mid(a, b outlinePoint) Point {
 	return Point{X: (a.x + b.x) / 2, Y: (a.y + b.y) / 2}

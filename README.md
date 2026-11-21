@@ -206,6 +206,14 @@ recovered):
   glyphs measured on several hundred real fonts stay 8.8 to 103 times below
   these limits.
 
+Nothing bounds the work over a whole font, since each glyph may take up to
+its own limit; `Face.GlyphCost` (and `GlyphOutlineCost`, `GlyphSVGPathCost`,
+which return it with the outline from one interpretation) reports the
+operators or points a glyph took, so a caller sums them and refuses the font
+past a total of its own, deterministically and with no state shared on the
+`Font`. A glyph over its limit reports an error matching `ErrOutlineBudget`.
+STIX Two Math's 6,760 glyphs total 166,885 operators.
+
 A font past any bound is refused with an error, never truncated. Every bound
 has a test that builds the hostile font and asserts the refusal under a
 small allocation ceiling, and each case is a committed fuzz seed.
