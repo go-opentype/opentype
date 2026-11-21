@@ -185,6 +185,30 @@ Rasterisation uses uniform supersampling (not the delta-hinted rasterisation
 of a native TrueType/CFF hinter's drop-out control), so it favours
 correctness and portability over the very last drop of small-size sharpness.
 
+## Untrusted fonts
+
+`Parse`, `ParseType1` and the glyph accessors may be fed fonts from
+anywhere. What a font declares is checked before it is allocated, so a few
+hundred bytes cannot ask for gigabytes (a Go out-of-memory cannot be
+recovered):
+
+- **Declared counts.** Every count that sizes an allocation is checked
+  against the bytes actually present, by division, so a 32-bit count cannot
+  overflow the check on a 32-bit build.
+- **Shared and multiplied structure.** A sub-table that many offsets point at
+  is decoded once. Coverage and ClassDef tables are binary-searched in the
+  font's bytes, as HarfBuzz does, never expanded glyph by glyph. A per-`Parse`
+  budget of 1 MiB plus 64 bytes per input byte backs this up.
+- **Per glyph.** A composite TrueType glyph may expand to at most 65,535
+  points. A CFF, CFF2 or Type 1 charstring may execute at most 131,072
+  operators, subroutines included, and emit at most 65,536 points. The largest
+  glyphs measured on several hundred real fonts stay 8.8 to 103 times below
+  these limits.
+
+A font past any bound is refused with an error, never truncated. Every bound
+has a test that builds the hostile font and asserts the refusal under a
+small allocation ceiling, and each case is a committed fuzz seed.
+
 ## Testing
 
 Tests never depend on an external font to reach 100% coverage: they
