@@ -40,12 +40,20 @@ func TestMathVariantsUnitsKeepTheFraction(t *testing.T) {
 	if len(hv) != 1 || ha != nil {
 		t.Errorf("horizontal = %+v, %+v", hv, ha)
 	}
-	if v, a := fc.MathVariantsUnits(99, true); v != nil || a != nil {
-		t.Errorf("uncovered = %+v, %+v", v, a)
+	// recovered: a missing guard dereferences nil, and that must read as a failed
+	// assertion about nil, nil, not as a crash.
+	nilNil := func(name string, face *Face, gid GlyphIndex) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("%s: panicked instead of returning nil, nil: %v", name, r)
+			}
+		}()
+		if v, a := face.MathVariantsUnits(gid, true); v != nil || a != nil {
+			t.Errorf("%s = %+v, %+v, want nil, nil", name, v, a)
+		}
 	}
-	if v, a := fontWithMATH(t, nil).NewFace(1000).MathVariantsUnits(0, true); v != nil || a != nil {
-		t.Errorf("no MATH = %+v, %+v", v, a)
-	}
+	nilNil("uncovered glyph", fc, 99)
+	nilNil("no MATH table", fontWithMATH(t, nil).NewFace(1000), 0)
 
 	// At scale 1.0 the two forms agree.
 	one := f.NewFace(1000)
