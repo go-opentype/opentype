@@ -356,6 +356,40 @@ func TestGSUBAlternate(t *testing.T) {
 	}
 }
 
+// ApplyAlternate picks the alt-th alternate and clamps to the last one: the
+// OpenType MATH note on ssty has script take the first alternate and scriptscript
+// the second, and a set that lists one serves both.
+func TestGSUBApplyAlternateIndex(t *testing.T) {
+	sub := buildSetListSubst(buildCoverage1(5, 7, 8), [][]byte{
+		buildSequence(60, 61),
+		buildSequence(70),
+		buildSequence(),
+	})
+	scripts := []tScript{{tag: "DFLT", def: &tLangSys{required: 0xFFFF, features: []uint16{0}}}}
+	feats := []tFeature{{tag: "ssty", lookups: []uint16{0}}}
+	g, err := parseGSUB(buildLayoutTable(scripts, feats, [][]byte{buildLookup(3, [][]byte{sub})}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := []GlyphIndex{5, 7, 8, 9}
+	for _, c := range []struct {
+		alt  int
+		want []GlyphIndex
+	}{
+		{-1, []GlyphIndex{60, 70, 8, 9}}, // a negative index is the first
+		{0, []GlyphIndex{60, 70, 8, 9}},
+		{1, []GlyphIndex{61, 70, 8, 9}}, // glyph 7 lists one alternate: it serves both
+		{9, []GlyphIndex{61, 70, 8, 9}}, // past the end is the last
+	} {
+		if got := g.ApplyAlternate(in, c.alt, "ssty"); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("ApplyAlternate(alt %d) = %v want %v", c.alt, got, c.want)
+		}
+	}
+	if !reflect.DeepEqual(in, []GlyphIndex{5, 7, 8, 9}) {
+		t.Errorf("input mutated: %v", in)
+	}
+}
+
 // --- Type 5: contextual substitution ----------------------------------------
 
 func TestGSUBContext1(t *testing.T) {

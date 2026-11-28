@@ -377,6 +377,37 @@ func TestFaceShapeLigature(t *testing.T) {
 	}
 }
 
+func TestFaceShapeAlternate(t *testing.T) {
+	// glyphs: 0, 1 'k', 2 'y', 3/4 k's script and scriptscript alternates, 5 y's.
+	sub := buildSetListSubst(buildCoverage1(1, 2), [][]byte{buildSequence(3, 4), buildSequence(5)})
+	scripts := []tScript{{tag: "DFLT", def: &tLangSys{required: 0xFFFF, features: []uint16{0}}}}
+	feats := []tFeature{{tag: "ssty", lookups: []uint16{0}}}
+	gsub := buildLayoutTable(scripts, feats, [][]byte{buildLookup(3, [][]byte{sub})})
+	sq := squareGlyph()
+	f := makeFont(t, [][]byte{nil, sq, sq, sq, sq, sq}, map[rune]uint16{'k': 1, 'y': 2},
+		map[string][]byte{"GSUB": gsub})
+	fc := f.NewFace(1000)
+	for _, c := range []struct {
+		alt  int
+		want []GlyphIndex
+	}{{0, []GlyphIndex{3, 5}}, {1, []GlyphIndex{4, 5}}, {7, []GlyphIndex{4, 5}}} {
+		if got := fc.ShapeAlternate("ky", c.alt, "ssty"); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("ShapeAlternate(ky, %d, ssty) = %v want %v", c.alt, got, c.want)
+		}
+	}
+	if got := fc.Shape("ky", "ssty"); !reflect.DeepEqual(got, []GlyphIndex{3, 5}) {
+		t.Errorf("Shape is ShapeAlternate with 0: got %v", got)
+	}
+	// Without the feature, or without GSUB, the plain cmap run.
+	if got := fc.ShapeAlternate("ky", 1); !reflect.DeepEqual(got, []GlyphIndex{1, 2}) {
+		t.Errorf("no feature: %v", got)
+	}
+	g := makeFont(t, [][]byte{nil, sq, sq}, map[rune]uint16{'k': 1, 'y': 2}, nil)
+	if got := g.NewFace(1000).ShapeAlternate("ky", 1, "ssty"); !reflect.DeepEqual(got, []GlyphIndex{1, 2}) {
+		t.Errorf("no GSUB: %v", got)
+	}
+}
+
 func TestFaceShapeNoGSUB(t *testing.T) {
 	// A font with no GSUB table returns the plain cmap mapping regardless of
 	// requested features.
