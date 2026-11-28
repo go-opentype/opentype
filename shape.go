@@ -27,6 +27,30 @@ func (fc *Face) Shape(text string, features ...string) []GlyphIndex {
 	return glyphs
 }
 
+// ShapeAlternate is Shape with the alternate of an alternate-substitution
+// (GSUB type 3) lookup chosen by the caller: alt is a 0-based index, and an index
+// past the end of a glyph's set takes its last alternate. Shape is ShapeAlternate
+// with alt 0.
+//
+// It exists for the "ssty" (math script-style alternates) feature. The OpenType
+// registered-features chapter (features_pt, 'ssty') recommends a type 3 lookup
+// whose first alternate serves script level 1 and whose second serves level 2,
+// "or single substitution" when no second level exists, so a typesetter asks
+// ShapeAlternate(s, 0, "ssty") for a first-order script and
+// ShapeAlternate(s, 1, "ssty") for a second-order one. A type 1 lookup is
+// unaffected by alt, and an index past a glyph's set takes its last alternate.
+func (fc *Face) ShapeAlternate(text string, alt int, features ...string) []GlyphIndex {
+	var glyphs []GlyphIndex
+	for _, r := range text {
+		gid, _ := fc.font.GlyphIndex(r) // unmapped -> 0 (.notdef)
+		glyphs = append(glyphs, gid)
+	}
+	if fc.font.gsub != nil {
+		glyphs = fc.font.gsub.ApplyAlternate(glyphs, alt, features...)
+	}
+	return glyphs
+}
+
 // PositionedGlyph is one glyph of a positioned run produced by ShapePositioned:
 // the glyph to draw, the pen-relative placement offsets (XOffset, YOffset) GPOS
 // assigned it (a non-zero YOffset lifts an attached diacritic onto its base),

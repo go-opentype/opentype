@@ -69,6 +69,7 @@ type gsubApplier struct {
 	clusters []int
 	gdef     *gdefTable // font GDEF (nil when absent); drives glyph skipping
 	skip     skipper    // skipper of the lookup currently being applied
+	alt      int        // 0-based alternate an alternate-substitution lookup picks
 }
 
 // skipperFor builds the glyph skipper for lookup lk from the applier's GDEF
@@ -410,7 +411,7 @@ func parseGSUBAlternate(b []byte) (gsubSubtable, error) {
 	return &gsubAlternate1{cov: cov, sets: sets}, nil
 }
 
-func (s *gsubAlternate1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
+func (s *gsubAlternate1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphIndex, int, bool) {
 	idx, ok := s.cov.get(g[i])
 	if !ok {
 		return g, i, false
@@ -419,7 +420,11 @@ func (s *gsubAlternate1) sub(_ *gsubApplier, g []GlyphIndex, i int) ([]GlyphInde
 	if len(alts) == 0 {
 		return g, i, false
 	}
-	g[i] = alts[0]
+	n := a.alt
+	if n >= len(alts) {
+		n = len(alts) - 1
+	}
+	g[i] = alts[n]
 	return g, i + 1, true
 }
 
@@ -1179,6 +1184,18 @@ func (s *gsubReverseChain1) sub(a *gsubApplier, g []GlyphIndex, i int) ([]GlyphI
 // input slice is not modified. Feature tags with no matching lookups, and an
 // empty run, leave the input unchanged.
 func (g *gsub) Apply(glyphs []GlyphIndex, features ...string) []GlyphIndex {
+	return g.ApplyAlternate(glyphs, 0, features...)
+}
+
+// ApplyAlternate is Apply with the alternate an alternate-substitution lookup
+// (type 3) picks fixed: alt is the 0-based index into the glyph's alternate
+// set, and an index past the end of a set takes the set's last alternate (the
+// OpenType MATH note on ssty: a font that lists a single alternate serves
+// script and scriptscript alike). Apply is ApplyAlternate with alt 0.
+func (g *gsub) ApplyAlternate(glyphs []GlyphIndex, alt int, features ...string) []GlyphIndex {
+	if alt < 0 {
+		alt = 0
+	}
 	want := make(map[string]bool, len(features))
 	for _, f := range features {
 		want[f] = true
@@ -1188,7 +1205,7 @@ func (g *gsub) Apply(glyphs []GlyphIndex, features ...string) []GlyphIndex {
 		return glyphs
 	}
 	out := append([]GlyphIndex(nil), glyphs...)
-	a := &gsubApplier{lookups: g.lookups, gdef: g.gdef}
+	a := &gsubApplier{lookups: g.lookups, gdef: g.gdef, alt: alt}
 	for _, li := range idxs {
 		if li >= len(g.lookups) {
 			continue
